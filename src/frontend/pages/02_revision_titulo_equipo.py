@@ -1,0 +1,78 @@
+import streamlit as st
+
+try:
+    from src.frontend.utils import api_get, api_put
+except ModuleNotFoundError:  # pragma: no cover
+    from frontend.utils import api_get, api_put
+
+st.title("Fase 2 - Revision titulo y equipo")
+
+try:
+    rows = api_get("/movies", params={"limit": 5000})
+except Exception as exc:
+    st.error(str(exc))
+    st.stop()
+
+if not rows:
+    st.info("No hay peliculas cargadas.")
+    st.stop()
+
+movie_ids = [row["id"] for row in rows]
+
+if "movie_idx" not in st.session_state:
+    st.session_state["movie_idx"] = 0
+
+selected_id = st.selectbox("Selecciona pelicula", movie_ids, index=st.session_state["movie_idx"])
+st.session_state["movie_idx"] = movie_ids.index(selected_id)
+
+col_l, col_r = st.columns(2)
+with col_l:
+    if st.button("Anterior", disabled=st.session_state["movie_idx"] == 0):
+        st.session_state["movie_idx"] -= 1
+        st.rerun()
+with col_r:
+    if st.button("Siguiente", disabled=st.session_state["movie_idx"] == len(movie_ids) - 1):
+        st.session_state["movie_idx"] += 1
+        st.rerun()
+
+st.caption(f"Registro {st.session_state['movie_idx'] + 1} de {len(movie_ids)}")
+
+movie = api_get(f"/movies/{selected_id}")
+
+left, right = st.columns([1, 2])
+
+with left:
+    st.write(f"ID: {selected_id}")
+    if movie.get("image_path"):
+        st.image(movie["image_path"], use_container_width=True)
+
+with right:
+    st.markdown("### Extraccion")
+    st.write("Titulo extraido:", movie.get("extraction_title") or "")
+    st.write("Equipo extraido:", ", ".join(movie.get("extraction_team", [])))
+
+    default_title = movie.get("manual_title") or movie.get("extraction_title") or ""
+    default_team = ", ".join(movie.get("manual_team") or movie.get("extraction_team") or [])
+
+    with st.form("review_form"):
+        title = st.text_input("Titulo revisado", value=default_title)
+        team_text = st.text_area("Equipo revisado (coma o salto de linea)", value=default_team, height=120)
+        save = st.form_submit_button("Guardar cambios")
+
+    if save:
+        team = [part.strip() for part in team_text.replace("\n", ",").split(",") if part.strip()]
+        try:
+            api_put(
+                f"/movies/{selected_id}/title-team",
+                json={"title": title, "team": team},
+            )
+            st.success("Guardado")
+        except Exception as exc:
+            st.error(str(exc))
+
+st.divider()
+
+c1, c2, c3 = st.columns(3)
+c1.metric("IMDb", movie.get("imdb_status") or "")
+c2.metric("OMDb", movie.get("omdb_status") or "")
+c3.metric("Plot ES", movie.get("translation_status") or "")

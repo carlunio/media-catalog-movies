@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+streamlit
+duckdb
+requests
+pillow
+pillow-heif
+ollama
+googlesearch-python
+
+[dev]
+pytest
+black
+ruff

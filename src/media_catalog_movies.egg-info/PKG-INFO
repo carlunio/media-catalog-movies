@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: media-catalog-movies
+Version: 0.1.0
+Requires-Python: >=3.12
+License-File: LICENSE
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: streamlit
+Requires-Dist: duckdb
+Requires-Dist: requests
+Requires-Dist: pillow
+Requires-Dist: pillow-heif
+Requires-Dist: ollama
+Requires-Dist: googlesearch-python
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Dynamic: license-file

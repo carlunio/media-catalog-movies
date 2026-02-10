@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.duckdb
+*.duckdb.wal
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.streamlit/
+.DS_Store
+
+
+exports/
+
+data/input
+data/output/
