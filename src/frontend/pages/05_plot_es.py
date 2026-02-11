@@ -4,16 +4,32 @@ import requests
 import streamlit as st
 
 try:
-    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put
+    from src.frontend.utils import (
+        LONG_TIMEOUT_SECONDS,
+        api_get,
+        api_post,
+        api_put,
+        select_ollama_model,
+    )
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put
+    from frontend.utils import (
+        LONG_TIMEOUT_SECONDS,
+        api_get,
+        api_post,
+        api_put,
+        select_ollama_model,
+    )
 
 st.title("Fase 5 - Traduccion plot")
 
 movie_id = st.text_input("ID concreto (opcional)", value="")
 limit = st.number_input("Limite batch", min_value=1, max_value=5000, value=20)
 overwrite = st.checkbox("Retraducir aunque ya exista", value=False)
-model = st.text_input("Modelo traduccion", value=os.getenv("TRANSLATION_MODEL", "phi4:latest"))
+model = select_ollama_model(
+    "Modelo traduccion",
+    os.getenv("TRANSLATION_MODEL", "phi4:latest"),
+    key="translation_model",
+)
 
 if st.button("Traducir plots"):
     try:

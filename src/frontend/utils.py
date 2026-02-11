@@ -63,3 +63,28 @@ def load_stats() -> dict[str, int]:
             "needs_omdb": 0,
             "needs_translation": 0,
         }
+
+
+@st.cache_data(ttl=30)
+def load_ollama_models() -> list[str]:
+    payload = api_get("/models/ollama")
+    raw = payload.get("models", []) if isinstance(payload, dict) else []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def select_ollama_model(label: str, default_model: str, *, key: str) -> str:
+    resolved_default = (default_model or "").strip()
+
+    try:
+        available = load_ollama_models()
+    except Exception:
+        available = []
+
+    options = available[:]
+    if resolved_default and resolved_default not in options:
+        options.insert(0, resolved_default)
+    if not options:
+        options = [resolved_default] if resolved_default else [""]
+
+    index = options.index(resolved_default) if resolved_default in options else 0
+    return st.selectbox(label, options, index=index, key=key)

@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 
+from .clients import ClientError, list_ollama_models
 from .config import TRANSLATION_MODEL, VISION_TEAM_MODEL, VISION_TITLE_MODEL
 from .schemas.imdb import ManualImdbRequest, RunImdbRequest
 from .schemas.ingest import IngestRequest, RunExtractRequest
@@ -23,6 +24,14 @@ def health() -> dict[str, str]:
 @app.get("/stats")
 def stats() -> dict[str, int]:
     return movies.get_stats()
+
+
+@app.get("/models/ollama")
+def ollama_models():
+    try:
+        return {"models": list_ollama_models()}
+    except ClientError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/covers/ingest")

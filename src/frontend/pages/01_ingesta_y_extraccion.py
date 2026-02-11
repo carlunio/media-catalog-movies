@@ -5,9 +5,21 @@ import requests
 import streamlit as st
 
 try:
-    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, load_stats
+    from src.frontend.utils import (
+        LONG_TIMEOUT_SECONDS,
+        api_get,
+        api_post,
+        load_stats,
+        select_ollama_model,
+    )
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, load_stats
+    from frontend.utils import (
+        LONG_TIMEOUT_SECONDS,
+        api_get,
+        api_post,
+        load_stats,
+        select_ollama_model,
+    )
 
 st.title("Fase 1 - Ingesta y extraccion")
 
@@ -52,8 +64,16 @@ st.subheader("Extraccion titulo + equipo")
 movie_id = st.text_input("ID concreto (opcional)", value="")
 limit = st.number_input("Limite batch", min_value=1, max_value=5000, value=5, step=1)
 overwrite = st.checkbox("Reextraer aunque ya haya datos", value=False)
-title_model = st.text_input("Modelo para titulo", value=os.getenv("VISION_TITLE_MODEL", "gemma3:27b-it-qat"))
-team_model = st.text_input("Modelo para equipo", value=os.getenv("VISION_TEAM_MODEL", "qwen3-vl:32b"))
+title_model = select_ollama_model(
+    "Modelo para titulo",
+    os.getenv("VISION_TITLE_MODEL", "gemma3:27b-it-qat"),
+    key="extract_title_model",
+)
+team_model = select_ollama_model(
+    "Modelo para equipo",
+    os.getenv("VISION_TEAM_MODEL", "qwen3-vl:32b"),
+    key="extract_team_model",
+)
 
 st.caption(
     f"Esta accion puede tardar varios minutos por item con modelos grandes. "
