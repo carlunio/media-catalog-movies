@@ -39,6 +39,9 @@ All stages are persisted in `data/movies.duckdb` (table `movies`).
 - `VISION_TITLE_MODEL`: Ollama model used for title extraction.
 - `VISION_TEAM_MODEL`: Ollama model used for team extraction.
 - `TRANSLATION_MODEL`: Ollama model used for plot translation.
+- `IMDB_MAX_RESULTS`: max results checked per IMDb search attempt.
+- `IMDB_SLEEP_SECONDS`: delay between items during batch IMDb search.
+- `REQUEST_TIMEOUT_SECONDS`: backend HTTP timeout (used for IMDb/OMDb calls).
 - `API_URL`: frontend target backend URL.
 - `API_TIMEOUT_SECONDS`: default timeout for frontend -> backend requests.
 - `API_LONG_TIMEOUT_SECONDS`: timeout used by heavy jobs like cover extraction.

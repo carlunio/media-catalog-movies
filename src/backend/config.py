@@ -35,7 +35,7 @@ VISION_TITLE_MODEL = os.getenv("VISION_TITLE_MODEL", "gemma3:27b-it-qat")
 VISION_TEAM_MODEL = os.getenv("VISION_TEAM_MODEL", "qwen3-vl:32b")
 TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "phi4:latest")
 
-IMDB_MAX_RESULTS = _as_int(os.getenv("IMDB_MAX_RESULTS", "3"), 3)
+IMDB_MAX_RESULTS = _as_int(os.getenv("IMDB_MAX_RESULTS", "10"), 10)
 IMDB_SLEEP_SECONDS = _as_float(os.getenv("IMDB_SLEEP_SECONDS", "1.0"), 1.0)
 REQUEST_TIMEOUT_SECONDS = _as_float(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"), 20.0)
 

@@ -13,7 +13,7 @@ st.subheader("Busqueda automatica")
 movie_id = st.text_input("ID concreto (opcional)", value="")
 limit = st.number_input("Limite", min_value=1, max_value=5000, value=20)
 overwrite = st.checkbox("Rebuscar aunque ya exista URL", value=False)
-max_results = st.number_input("Resultados maximos Google", min_value=1, max_value=20, value=3)
+max_results = st.number_input("Resultados maximos por intento", min_value=1, max_value=20, value=10)
 
 if st.button("Ejecutar busqueda IMDb"):
     try:
@@ -64,6 +64,8 @@ st.write("Titulo extraido:", movie.get("extraction_title") or "")
 st.write("Equipo:", ", ".join(movie.get("manual_team") or movie.get("extraction_team") or []))
 st.write("Query usada:", movie.get("imdb_query") or "")
 st.write("Estado:", movie.get("imdb_status") or "")
+if movie.get("imdb_last_error"):
+    st.write("Ultimo error:", movie.get("imdb_last_error"))
 
 if movie.get("imdb_url"):
     st.markdown(f"IMDb actual: [{movie['imdb_url']}]({movie['imdb_url']})")
