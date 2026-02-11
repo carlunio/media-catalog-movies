@@ -1,4 +1,5 @@
 import streamlit as st
+from PIL import Image, ImageOps
 
 try:
     from src.frontend.utils import api_get, api_put
@@ -6,6 +7,12 @@ except ModuleNotFoundError:  # pragma: no cover
     from frontend.utils import api_get, api_put
 
 st.title("Fase 2 - Revision titulo y equipo")
+
+
+def _load_image_with_orientation(path: str):
+    with Image.open(path) as image:
+        # Respect EXIF orientation so portrait covers are not shown rotated.
+        return ImageOps.exif_transpose(image).copy()
 
 try:
     rows = api_get("/movies", params={"limit": 5000})
@@ -44,7 +51,10 @@ left, right = st.columns([1, 2])
 with left:
     st.write(f"ID: {selected_id}")
     if movie.get("image_path"):
-        st.image(movie["image_path"], use_container_width=True)
+        try:
+            st.image(_load_image_with_orientation(movie["image_path"]), use_container_width=True)
+        except (FileNotFoundError, OSError) as exc:
+            st.warning(f"No se pudo cargar la imagen: {exc}")
 
 with right:
     st.markdown("### Extraccion")
