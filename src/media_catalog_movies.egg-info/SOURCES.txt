@@ -13,6 +13,7 @@ src/backend/schemas/ingest.py
 src/backend/schemas/omdb.py
 src/backend/schemas/review.py
 src/backend/schemas/translation.py
+src/backend/schemas/workflow.py
 src/backend/services/__init__.py
 src/backend/services/cover_extraction.py
 src/backend/services/export.py
@@ -20,6 +21,9 @@ src/backend/services/imdb_links.py
 src/backend/services/movies.py
 src/backend/services/omdb_data.py
 src/backend/services/plot_translation.py
+src/backend/services/workflow.py
+src/backend/workflow/__init__.py
+src/backend/workflow/graph.py
 src/frontend/__init__.py
 src/frontend/app.py
 src/frontend/utils.py

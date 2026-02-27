@@ -1,36 +1,25 @@
 import os
 
 import pandas as pd
-import requests
 import streamlit as st
 
 try:
-    from src.frontend.utils import (
-        LONG_TIMEOUT_SECONDS,
-        api_get,
-        api_post,
-        load_stats,
-        select_ollama_model,
-    )
+    from src.frontend.utils import api_get, api_post, load_stats, render_timeout_controls
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import (
-        LONG_TIMEOUT_SECONDS,
-        api_get,
-        api_post,
-        load_stats,
-        select_ollama_model,
-    )
+    from frontend.utils import api_get, api_post, load_stats, render_timeout_controls
 
-st.title("Fase 1 - Ingesta y extraccion")
+st.title("Fase 1 - Ingesta")
+render_timeout_controls()
 
 stats = load_stats()
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Total", stats["total"])
-c2.metric("Sin extraccion", stats["needs_extraction"])
-c3.metric("Sin revision", stats["needs_manual_review"])
-c4.metric("Sin IMDb", stats["needs_imdb"])
-c5.metric("Sin OMDb", stats["needs_omdb"])
-c6.metric("Sin traduccion", stats["needs_translation"])
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+c1.metric("Total", stats.get("total", 0))
+c2.metric("Sin extraccion", stats.get("needs_extraction", 0))
+c3.metric("Sin revision", stats.get("needs_manual_review", 0))
+c4.metric("Sin IMDb", stats.get("needs_imdb", 0))
+c5.metric("Sin OMDb", stats.get("needs_omdb", 0))
+c6.metric("Sin traduccion", stats.get("needs_translation", 0))
+c7.metric("Pendiente revision", stats.get("needs_workflow_review", 0))
 
 st.divider()
 
@@ -60,54 +49,25 @@ if st.button("Ingestar carpeta"):
 
 st.divider()
 
-st.subheader("Extraccion titulo + equipo")
-movie_id = st.text_input("ID concreto (opcional)", value="")
-limit = st.number_input("Limite batch", min_value=1, max_value=5000, value=5, step=1)
-overwrite = st.checkbox("Reextraer aunque ya haya datos", value=False)
-title_model = select_ollama_model(
-    "Modelo para titulo",
-    os.getenv("VISION_TITLE_MODEL", "gemma3:27b-it-qat"),
-    key="extract_title_model",
-)
-team_model = select_ollama_model(
-    "Modelo para equipo",
-    os.getenv("VISION_TEAM_MODEL", "qwen3-vl:32b"),
-    key="extract_team_model",
-)
+st.info("La orquestacion y la vista de grafo estan en la pagina `Fase 0 - Orquestacion LangGraph`.")
 
-st.caption(
-    f"Esta accion puede tardar varios minutos por item con modelos grandes. "
-    f"Timeout actual para esta llamada: {int(LONG_TIMEOUT_SECONDS)}s."
-)
-
-if st.button("Ejecutar extraccion"):
-    payload = {
-        "movie_id": movie_id or None,
-        "limit": int(limit),
-        "overwrite": overwrite,
-        "title_model": title_model,
-        "team_model": team_model,
-    }
-    try:
-        result = api_post("/extract/run", json=payload, timeout=LONG_TIMEOUT_SECONDS)
-        st.success("Extraccion finalizada")
-        st.json(result)
-    except requests.exceptions.ReadTimeout:
-        st.error(
-            "Timeout esperando al backend. "
-            "Reduce el limite batch o aumenta API_LONG_TIMEOUT_SECONDS en tu .env y reinicia Streamlit."
-        )
-    except Exception as exc:
-        st.error(str(exc))
-
-st.divider()
-
-st.subheader("Pendientes de extraccion")
+st.subheader("Pendientes de extraccion (detalle)")
 try:
     rows = api_get("/movies", params={"stage": "needs_extraction", "limit": 200})
     if rows:
         df = pd.DataFrame(rows)
-        st.dataframe(df[["id", "image_path", "extraction_title", "imdb_status", "omdb_status"]])
+        st.dataframe(
+            df[
+                [
+                    "id",
+                    "image_path",
+                    "extraction_title",
+                    "workflow_status",
+                    "workflow_needs_review",
+                    "workflow_review_reason",
+                ]
+            ]
+        )
     else:
         st.info("No hay pendientes.")
 except Exception as exc:

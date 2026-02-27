@@ -2,11 +2,12 @@ import requests
 import streamlit as st
 
 try:
-    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put
+    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put, render_timeout_controls
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put
+    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put, render_timeout_controls
 
 st.title("Fase 4 - OMDb")
+render_timeout_controls()
 
 movie_id = st.text_input("ID concreto (opcional)", value="")
 limit = st.number_input("Limite batch", min_value=1, max_value=5000, value=20)
@@ -28,7 +29,7 @@ if st.button("Descargar OMDb"):
     except requests.exceptions.ReadTimeout:
         st.error(
             "Timeout esperando al backend. "
-            "Reduce el limite batch o aumenta API_LONG_TIMEOUT_SECONDS en tu .env y reinicia Streamlit."
+            "Reduce el limite batch o cambia el modo en Sidebar > HTTP timeout."
         )
     except Exception as exc:
         st.error(str(exc))

@@ -1,7 +1,7 @@
 from typing import Any
 
 from ..clients import http_get_json
-from ..config import OMDB_API_KEY
+from ..config import OMDB_API_KEY, OMDB_PLOT_MODE
 from . import movies
 
 
@@ -19,7 +19,7 @@ def fetch_one(movie_id: str, imdb_id: str | None = None) -> dict[str, Any]:
 
     payload = http_get_json(
         "https://www.omdbapi.com/",
-        params={"i": target_imdb_id, "apikey": OMDB_API_KEY},
+        params={"i": target_imdb_id, "apikey": OMDB_API_KEY, "plot": OMDB_PLOT_MODE},
     )
 
     if payload.get("Response") != "True":

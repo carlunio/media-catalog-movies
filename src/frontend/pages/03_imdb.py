@@ -3,11 +3,12 @@ import requests
 import streamlit as st
 
 try:
-    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put
+    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put, render_timeout_controls
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put
+    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put, render_timeout_controls
 
 st.title("Fase 3 - IMDb")
+render_timeout_controls()
 
 st.subheader("Busqueda automatica")
 movie_id = st.text_input("ID concreto (opcional)", value="")
@@ -32,7 +33,7 @@ if st.button("Ejecutar busqueda IMDb"):
     except requests.exceptions.ReadTimeout:
         st.error(
             "Timeout esperando al backend. "
-            "Reduce el limite batch o aumenta API_LONG_TIMEOUT_SECONDS en tu .env y reinicia Streamlit."
+            "Reduce el limite batch o cambia el modo en Sidebar > HTTP timeout."
         )
     except Exception as exc:
         st.error(str(exc))
@@ -66,6 +67,10 @@ st.write("Query usada:", movie.get("imdb_query") or "")
 st.write("Estado:", movie.get("imdb_status") or "")
 if movie.get("imdb_last_error"):
     st.write("Ultimo error:", movie.get("imdb_last_error"))
+st.write("Workflow:", movie.get("workflow_status") or "")
+st.write("Etapa:", movie.get("pipeline_stage") or "")
+if movie.get("workflow_needs_review"):
+    st.warning(movie.get("workflow_review_reason") or "Pendiente de revision")
 
 if movie.get("imdb_url"):
     st.markdown(f"IMDb actual: [{movie['imdb_url']}]({movie['imdb_url']})")
@@ -80,7 +85,7 @@ if st.button("Buscar IMDb solo para este ID"):
         st.success("Busqueda completada")
         st.json(result)
     except requests.exceptions.ReadTimeout:
-        st.error("Timeout esperando al backend para este ID.")
+        st.error("Timeout esperando al backend para este ID. Prueba Sidebar > HTTP timeout.")
     except Exception as exc:
         st.error(str(exc))
 

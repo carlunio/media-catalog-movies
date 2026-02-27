@@ -271,15 +271,18 @@ def run_batch(
     max_results: int = IMDB_MAX_RESULTS,
     sleep_seconds: float = IMDB_SLEEP_SECONDS,
 ) -> dict[str, Any]:
-    if movie_id:
-        one = movies.get_movie(movie_id)
-        targets = [] if one is None else [one]
-    else:
-        targets = movies.movies_for_imdb(limit=limit, overwrite=overwrite)
-
     results: list[dict[str, Any]] = []
-    for row in targets:
-        result = _search_and_store(row, max_results=max_results)
+    if movie_id:
+        targets = [movie_id]
+    else:
+        targets = [row["id"] for row in movies.movies_for_imdb(limit=limit, overwrite=overwrite)]
+
+    for mid in targets:
+        result = search_one(
+            mid,
+            max_results=max_results,
+            overwrite=overwrite,
+        )
         results.append(result)
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
@@ -289,3 +292,24 @@ def run_batch(
         "processed": len(results),
         "items": results,
     }
+
+
+def search_one(
+    movie_id: str,
+    *,
+    max_results: int = IMDB_MAX_RESULTS,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    movie = movies.get_movie(movie_id)
+    if not movie:
+        return {"id": movie_id, "status": "error", "error": "Movie not found"}
+
+    if not overwrite and movie.get("imdb_url"):
+        return {
+            "id": movie_id,
+            "status": "skipped",
+            "imdb_url": movie.get("imdb_url"),
+            "query": movie.get("imdb_query"),
+        }
+
+    return _search_and_store(movie, max_results=max_results)

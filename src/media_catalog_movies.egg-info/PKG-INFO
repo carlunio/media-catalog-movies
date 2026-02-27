@@ -12,6 +12,7 @@ Requires-Dist: pillow
 Requires-Dist: pillow-heif
 Requires-Dist: ollama
 Requires-Dist: googlesearch-python
+Requires-Dist: langgraph
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: black; extra == "dev"

@@ -12,7 +12,8 @@ dependencies = [
   "pillow",
   "pillow-heif",
   "ollama",
-  "googlesearch-python"
+  "googlesearch-python",
+  "langgraph"
 ]
 
 [project.optional-dependencies]

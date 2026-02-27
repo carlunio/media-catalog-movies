@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,43 @@ from ..normalizers import (
     extract_imdb_id,
     parse_json_list,
 )
+
+WORKFLOW_STAGE_ORDER = {
+    "extraction": 1,
+    "imdb": 2,
+    "omdb": 3,
+    "translation": 4,
+}
+
+
+def _derive_pipeline_stage_from_dict(movie: dict[str, Any]) -> str:
+    if bool(movie.get("workflow_needs_review")):
+        return "review"
+
+    workflow_status = str(movie.get("workflow_status") or "").lower()
+    workflow_node = str(movie.get("workflow_current_node") or "").strip()
+    if workflow_status == "running":
+        return f"running:{workflow_node}" if workflow_node else "running"
+
+    extraction_title = str(movie.get("extraction_title") or "").strip()
+    extraction_team = parse_json_list(movie.get("extraction_team_json"))
+    if not extraction_title or not extraction_team:
+        return "extraction"
+
+    imdb_url = str(movie.get("imdb_url") or "").strip()
+    if not imdb_url:
+        return "imdb"
+
+    omdb_status = str(movie.get("omdb_status") or "").lower()
+    if omdb_status != "fetched":
+        return "omdb"
+
+    omdb_plot_en = str(movie.get("omdb_plot_en") or "").strip()
+    omdb_plot_es = str(movie.get("omdb_plot_es") or "").strip()
+    if omdb_plot_en and not omdb_plot_es:
+        return "translation"
+
+    return "done"
 
 
 def init_table() -> None:
@@ -65,12 +103,43 @@ def init_table() -> None:
             translation_model TEXT,
             translation_last_error TEXT,
 
+            workflow_status TEXT DEFAULT 'pending',
+            workflow_current_node TEXT,
+            workflow_needs_review BOOLEAN DEFAULT FALSE,
+            workflow_review_reason TEXT,
+            workflow_attempt INTEGER DEFAULT 0,
+            workflow_last_action TEXT,
+            workflow_last_error TEXT,
+            workflow_history_json JSON,
+
             created_at TIMESTAMP DEFAULT now(),
             updated_at TIMESTAMP DEFAULT now()
         )
         """
     )
+
+    _ensure_columns(con)
     con.close()
+
+
+
+def _ensure_columns(con) -> None:
+    existing = {row[1] for row in con.execute("PRAGMA table_info(movies)").fetchall()}
+    required_columns = {
+        "workflow_status": "TEXT DEFAULT 'pending'",
+        "workflow_current_node": "TEXT",
+        "workflow_needs_review": "BOOLEAN DEFAULT FALSE",
+        "workflow_review_reason": "TEXT",
+        "workflow_attempt": "INTEGER DEFAULT 0",
+        "workflow_last_action": "TEXT",
+        "workflow_last_error": "TEXT",
+        "workflow_history_json": "JSON",
+    }
+
+    for col, ddl in required_columns.items():
+        if col not in existing:
+            con.execute(f"ALTER TABLE movies ADD COLUMN {col} {ddl}")
+
 
 
 def _load_json(value: Any) -> Any:
@@ -89,8 +158,353 @@ def _load_json(value: Any) -> Any:
     return value
 
 
+
 def _serialize_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+
+def _append_workflow_history(
+    movie_id: str,
+    *,
+    event_type: str,
+    node: str | None,
+    message: str | None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    con = get_connection()
+    row = con.execute(
+        "SELECT workflow_history_json FROM movies WHERE id = ?",
+        (movie_id,),
+    ).fetchone()
+
+    history_raw = row[0] if row else None
+    history = _load_json(history_raw)
+    if not isinstance(history, list):
+        history = []
+
+    event = {
+        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "type": event_type,
+        "node": node,
+        "message": message,
+        "payload": payload or {},
+    }
+    history.append(event)
+    history = history[-100:]
+
+    con.execute(
+        """
+        UPDATE movies
+        SET
+            workflow_history_json = ?,
+            updated_at = now()
+        WHERE id = ?
+        """,
+        (_serialize_json(history), movie_id),
+    )
+    con.close()
+
+
+
+def _update_workflow_fields(movie_id: str, fields: dict[str, Any]) -> None:
+    clean_fields = {k: v for k, v in fields.items()}
+    if not clean_fields:
+        return
+
+    assignments = ", ".join(f"{col} = ?" for col in clean_fields)
+    values = list(clean_fields.values())
+
+    con = get_connection()
+    con.execute(
+        f"UPDATE movies SET {assignments}, updated_at = now() WHERE id = ?",
+        values + [movie_id],
+    )
+    con.close()
+
+
+
+def set_workflow_running(movie_id: str, *, node: str, action: str | None = None) -> None:
+    fields: dict[str, Any] = {
+        "workflow_status": "running",
+        "workflow_current_node": node,
+        "workflow_last_error": None,
+    }
+    if action is not None:
+        fields["workflow_last_action"] = action
+
+    _update_workflow_fields(movie_id, fields)
+    _append_workflow_history(
+        movie_id,
+        event_type="running",
+        node=node,
+        message="Workflow running",
+        payload={"action": action} if action else None,
+    )
+
+
+
+def set_workflow_pending(movie_id: str, *, node: str, reason: str | None = None) -> None:
+    _update_workflow_fields(
+        movie_id,
+        {
+            "workflow_status": "pending",
+            "workflow_current_node": node,
+            "workflow_last_error": None,
+        },
+    )
+    _append_workflow_history(
+        movie_id,
+        event_type="pending",
+        node=node,
+        message=reason or "Workflow paused",
+    )
+
+
+
+def set_workflow_error(movie_id: str, *, node: str, error: str) -> None:
+    _update_workflow_fields(
+        movie_id,
+        {
+            "workflow_status": "running",
+            "workflow_current_node": node,
+            "workflow_last_error": error,
+        },
+    )
+    _append_workflow_history(
+        movie_id,
+        event_type="error",
+        node=node,
+        message=error,
+    )
+
+
+
+def set_workflow_review(
+    movie_id: str,
+    *,
+    node: str,
+    reason: str,
+    error: str | None = None,
+) -> None:
+    _update_workflow_fields(
+        movie_id,
+        {
+            "workflow_status": "review",
+            "workflow_current_node": node,
+            "workflow_needs_review": True,
+            "workflow_review_reason": reason,
+            "workflow_last_error": error,
+        },
+    )
+    _append_workflow_history(
+        movie_id,
+        event_type="review",
+        node=node,
+        message=reason,
+        payload={"error": error} if error else None,
+    )
+
+
+
+def clear_workflow_review(movie_id: str) -> None:
+    _update_workflow_fields(
+        movie_id,
+        {
+            "workflow_needs_review": False,
+            "workflow_review_reason": None,
+        },
+    )
+
+
+
+def set_workflow_done(movie_id: str, *, node: str, action: str | None = None) -> None:
+    fields: dict[str, Any] = {
+        "workflow_status": "done",
+        "workflow_current_node": node,
+        "workflow_needs_review": False,
+        "workflow_review_reason": None,
+        "workflow_last_error": None,
+    }
+    if action is not None:
+        fields["workflow_last_action"] = action
+
+    _update_workflow_fields(movie_id, fields)
+    _append_workflow_history(
+        movie_id,
+        event_type="done",
+        node=node,
+        message="Workflow completed",
+        payload={"action": action} if action else None,
+    )
+
+
+
+def increment_workflow_attempt(movie_id: str) -> int:
+    con = get_connection()
+    row = con.execute(
+        "SELECT COALESCE(workflow_attempt, 0) FROM movies WHERE id = ?",
+        (movie_id,),
+    ).fetchone()
+    current = int(row[0]) if row else 0
+    updated = current + 1
+
+    con.execute(
+        "UPDATE movies SET workflow_attempt = ?, updated_at = now() WHERE id = ?",
+        (updated, movie_id),
+    )
+    con.close()
+
+    _append_workflow_history(
+        movie_id,
+        event_type="attempt",
+        node="retry",
+        message=f"Workflow attempt incremented to {updated}",
+    )
+
+    return updated
+
+
+
+def reset_workflow_attempt(movie_id: str) -> None:
+    _update_workflow_fields(movie_id, {"workflow_attempt": 0})
+
+
+
+def reset_from_stage(movie_id: str, stage: str) -> None:
+    stage = stage.strip().lower()
+    updates: dict[str, Any]
+
+    if stage == "extraction":
+        updates = {
+            "extraction_title": None,
+            "extraction_team_json": None,
+            "extraction_title_raw": None,
+            "extraction_team_raw": None,
+            "extraction_title_model": None,
+            "extraction_team_model": None,
+            "manual_title": None,
+            "manual_team_json": None,
+            "imdb_query": None,
+            "imdb_url": None,
+            "imdb_id": None,
+            "imdb_status": "pending",
+            "imdb_last_error": None,
+            "omdb_raw_json": None,
+            "omdb_status": "pending",
+            "omdb_last_error": None,
+            "omdb_title": None,
+            "omdb_year": None,
+            "omdb_rated": None,
+            "omdb_released": None,
+            "omdb_runtime": None,
+            "omdb_genre": None,
+            "omdb_director": None,
+            "omdb_writer": None,
+            "omdb_actors": None,
+            "omdb_plot_en": None,
+            "omdb_plot_es": None,
+            "omdb_language": None,
+            "omdb_country": None,
+            "omdb_awards": None,
+            "omdb_poster": None,
+            "omdb_imdbrating": None,
+            "omdb_imdbvotes": None,
+            "omdb_type": None,
+            "omdb_dvd": None,
+            "omdb_boxoffice": None,
+            "omdb_production": None,
+            "translation_status": "pending",
+            "translation_model": None,
+            "translation_last_error": None,
+        }
+    elif stage == "imdb":
+        updates = {
+            "imdb_query": None,
+            "imdb_url": None,
+            "imdb_id": None,
+            "imdb_status": "pending",
+            "imdb_last_error": None,
+            "omdb_raw_json": None,
+            "omdb_status": "pending",
+            "omdb_last_error": None,
+            "omdb_title": None,
+            "omdb_year": None,
+            "omdb_rated": None,
+            "omdb_released": None,
+            "omdb_runtime": None,
+            "omdb_genre": None,
+            "omdb_director": None,
+            "omdb_writer": None,
+            "omdb_actors": None,
+            "omdb_plot_en": None,
+            "omdb_plot_es": None,
+            "omdb_language": None,
+            "omdb_country": None,
+            "omdb_awards": None,
+            "omdb_poster": None,
+            "omdb_imdbrating": None,
+            "omdb_imdbvotes": None,
+            "omdb_type": None,
+            "omdb_dvd": None,
+            "omdb_boxoffice": None,
+            "omdb_production": None,
+            "translation_status": "pending",
+            "translation_model": None,
+            "translation_last_error": None,
+        }
+    elif stage == "omdb":
+        updates = {
+            "omdb_raw_json": None,
+            "omdb_status": "pending",
+            "omdb_last_error": None,
+            "omdb_title": None,
+            "omdb_year": None,
+            "omdb_rated": None,
+            "omdb_released": None,
+            "omdb_runtime": None,
+            "omdb_genre": None,
+            "omdb_director": None,
+            "omdb_writer": None,
+            "omdb_actors": None,
+            "omdb_plot_en": None,
+            "omdb_plot_es": None,
+            "omdb_language": None,
+            "omdb_country": None,
+            "omdb_awards": None,
+            "omdb_poster": None,
+            "omdb_imdbrating": None,
+            "omdb_imdbvotes": None,
+            "omdb_type": None,
+            "omdb_dvd": None,
+            "omdb_boxoffice": None,
+            "omdb_production": None,
+            "translation_status": "pending",
+            "translation_model": None,
+            "translation_last_error": None,
+        }
+    elif stage == "translation":
+        updates = {
+            "omdb_plot_es": None,
+            "translation_status": "pending",
+            "translation_model": None,
+            "translation_last_error": None,
+        }
+    else:
+        raise ValueError(f"Unknown stage: {stage}")
+
+    updates["workflow_needs_review"] = False
+    updates["workflow_review_reason"] = None
+    updates["workflow_last_error"] = None
+
+    _update_workflow_fields(movie_id, updates)
+    _append_workflow_history(
+        movie_id,
+        event_type="reset",
+        node=stage,
+        message=f"Reset from stage {stage}",
+    )
+
 
 
 def ingest_covers(
@@ -167,18 +581,23 @@ def ingest_covers(
     }
 
 
+
 def _row_to_dict(columns: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
     data = dict(zip(columns, row))
     data["extraction_team"] = parse_json_list(data.pop("extraction_team_json", None))
     data["manual_team"] = parse_json_list(data.pop("manual_team_json", None))
     data["omdb_raw"] = _load_json(data.pop("omdb_raw_json", None))
+    data["workflow_history"] = _load_json(data.pop("workflow_history_json", None))
+    data["pipeline_stage"] = _derive_pipeline_stage_from_dict(data)
     return data
+
 
 
 def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
     con = get_connection()
 
     where = ""
+    pipeline_filter: str | None = None
     if stage == "needs_extraction":
         where = "WHERE extraction_title IS NULL OR extraction_team_json IS NULL"
     elif stage == "needs_manual_review":
@@ -189,6 +608,20 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
         where = "WHERE imdb_id IS NOT NULL AND imdb_id <> '' AND (omdb_status IS NULL OR omdb_status <> 'fetched')"
     elif stage == "needs_translation":
         where = "WHERE omdb_plot_en IS NOT NULL AND omdb_plot_en <> '' AND (omdb_plot_es IS NULL OR omdb_plot_es = '')"
+    elif stage == "needs_workflow_review":
+        where = "WHERE workflow_needs_review = TRUE"
+    elif stage == "pipeline_extraction":
+        pipeline_filter = "extraction"
+    elif stage == "pipeline_imdb":
+        pipeline_filter = "imdb"
+    elif stage == "pipeline_omdb":
+        pipeline_filter = "omdb"
+    elif stage == "pipeline_translation":
+        pipeline_filter = "translation"
+    elif stage == "pipeline_review":
+        pipeline_filter = "review"
+    elif stage == "pipeline_done":
+        pipeline_filter = "done"
 
     rows = con.execute(
         f"""
@@ -206,6 +639,12 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
             translation_status,
             omdb_plot_en,
             omdb_plot_es,
+            workflow_status,
+            workflow_current_node,
+            workflow_needs_review,
+            workflow_review_reason,
+            workflow_attempt,
+            workflow_last_error,
             updated_at
         FROM movies
         {where}
@@ -234,11 +673,35 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
                 "translation_status": row[10],
                 "omdb_plot_en": row[11],
                 "omdb_plot_es": row[12],
-                "updated_at": row[13],
+                "workflow_status": row[13],
+                "workflow_current_node": row[14],
+                "workflow_needs_review": bool(row[15]) if row[15] is not None else False,
+                "workflow_review_reason": row[16],
+                "workflow_attempt": row[17],
+                "workflow_last_error": row[18],
+                "updated_at": row[19],
             }
         )
 
+        out[-1]["pipeline_stage"] = _derive_pipeline_stage_from_dict(
+            {
+                "extraction_title": row[2],
+                "extraction_team_json": row[3],
+                "imdb_url": row[6],
+                "omdb_status": row[9],
+                "omdb_plot_en": row[11],
+                "omdb_plot_es": row[12],
+                "workflow_status": row[13],
+                "workflow_current_node": row[14],
+                "workflow_needs_review": bool(row[15]) if row[15] is not None else False,
+            }
+        )
+
+    if pipeline_filter is not None:
+        out = [row for row in out if str(row.get("pipeline_stage", "")).startswith(pipeline_filter)]
+
     return out
+
 
 
 def get_movie(movie_id: str) -> dict[str, Any] | None:
@@ -253,6 +716,7 @@ def get_movie(movie_id: str) -> dict[str, Any] | None:
     con.close()
 
     return _row_to_dict(columns, row)
+
 
 
 def get_stats() -> dict[str, int]:
@@ -284,6 +748,9 @@ def get_stats() -> dict[str, int]:
           AND (omdb_plot_es IS NULL OR omdb_plot_es = '')
         """
     ).fetchone()[0]
+    needs_workflow_review = con.execute(
+        "SELECT COUNT(*) FROM movies WHERE workflow_needs_review = TRUE"
+    ).fetchone()[0]
 
     con.close()
 
@@ -294,7 +761,9 @@ def get_stats() -> dict[str, int]:
         "needs_imdb": needs_imdb,
         "needs_omdb": needs_omdb,
         "needs_translation": needs_translation,
+        "needs_workflow_review": needs_workflow_review,
     }
+
 
 
 def update_title_team(movie_id: str, title: str | None, team: list[str]) -> None:
@@ -305,12 +774,16 @@ def update_title_team(movie_id: str, title: str | None, team: list[str]) -> None
         SET
             manual_title = ?,
             manual_team_json = ?,
+            workflow_status = 'pending',
+            workflow_needs_review = FALSE,
+            workflow_review_reason = NULL,
             updated_at = now()
         WHERE id = ?
         """,
         (title, _serialize_json(team), movie_id),
     )
     con.close()
+
 
 
 def update_extraction(
@@ -334,6 +807,8 @@ def update_extraction(
             extraction_team_raw = ?,
             extraction_title_model = ?,
             extraction_team_model = ?,
+            workflow_status = 'pending',
+            workflow_last_error = NULL,
             updated_at = now()
         WHERE id = ?
         """,
@@ -348,6 +823,7 @@ def update_extraction(
         ),
     )
     con.close()
+
 
 
 def update_imdb(
@@ -371,12 +847,15 @@ def update_imdb(
             imdb_id = ?,
             imdb_status = ?,
             imdb_last_error = ?,
+            workflow_status = 'pending',
+            workflow_last_error = NULL,
             updated_at = now()
         WHERE id = ?
         """,
         (imdb_query, canonical_url, imdb_id, imdb_status, imdb_last_error, movie_id),
     )
     con.close()
+
 
 
 def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
@@ -393,12 +872,17 @@ def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
             imdb_id = ?,
             imdb_status = 'found',
             imdb_last_error = NULL,
+            workflow_status = 'pending',
+            workflow_needs_review = FALSE,
+            workflow_review_reason = NULL,
+            workflow_last_error = NULL,
             updated_at = now()
         WHERE id = ?
         """,
         (canonical_url, extract_imdb_id(canonical_url), movie_id),
     )
     con.close()
+
 
 
 def update_omdb(movie_id: str, omdb_payload: dict[str, Any], status: str, error: str | None) -> None:
@@ -411,6 +895,8 @@ def update_omdb(movie_id: str, omdb_payload: dict[str, Any], status: str, error:
             SET
                 omdb_status = ?,
                 omdb_last_error = ?,
+                workflow_status = 'pending',
+                workflow_last_error = NULL,
                 updated_at = now()
             WHERE id = ?
             """,
@@ -446,6 +932,8 @@ def update_omdb(movie_id: str, omdb_payload: dict[str, Any], status: str, error:
             omdb_dvd = ?,
             omdb_boxoffice = ?,
             omdb_production = ?,
+            workflow_status = 'pending',
+            workflow_last_error = NULL,
             updated_at = now()
         WHERE id = ?
         """,
@@ -476,6 +964,7 @@ def update_omdb(movie_id: str, omdb_payload: dict[str, Any], status: str, error:
     )
 
     con.close()
+
 
 
 def update_omdb_fields(movie_id: str, fields: dict[str, Any]) -> None:
@@ -509,6 +998,7 @@ def update_omdb_fields(movie_id: str, fields: dict[str, Any]) -> None:
     con.close()
 
 
+
 def update_plot_translation(
     movie_id: str,
     *,
@@ -526,12 +1016,15 @@ def update_plot_translation(
             translation_model = ?,
             translation_status = ?,
             translation_last_error = ?,
+            workflow_status = 'pending',
+            workflow_last_error = NULL,
             updated_at = now()
         WHERE id = ?
         """,
         (plot_es, model, status, error, movie_id),
     )
     con.close()
+
 
 
 def movies_for_extraction(limit: int, overwrite: bool) -> list[dict[str, str]]:
@@ -553,6 +1046,7 @@ def movies_for_extraction(limit: int, overwrite: bool) -> list[dict[str, str]]:
     con.close()
 
     return [{"id": row[0], "image_path": row[1]} for row in rows]
+
 
 
 def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
@@ -592,6 +1086,7 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     return output
 
 
+
 def movies_for_omdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con = get_connection()
     where = "WHERE imdb_id IS NOT NULL AND imdb_id <> ''"
@@ -613,6 +1108,7 @@ def movies_for_omdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     return [{"id": row[0], "imdb_id": row[1]} for row in rows]
 
 
+
 def movies_for_translation(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con = get_connection()
     where = "WHERE omdb_plot_en IS NOT NULL AND omdb_plot_en <> ''"
@@ -632,3 +1128,49 @@ def movies_for_translation(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con.close()
 
     return [{"id": row[0], "omdb_plot_en": row[1]} for row in rows]
+
+
+
+def movie_ids_for_workflow(
+    *,
+    limit: int,
+    start_stage: str = "extraction",
+    overwrite: bool = False,
+) -> list[str]:
+    stage = start_stage.lower().strip()
+
+    con = get_connection()
+    if overwrite:
+        where = ""
+    elif stage == "extraction":
+        where = "WHERE extraction_title IS NULL OR extraction_team_json IS NULL OR workflow_needs_review = TRUE"
+    elif stage == "imdb":
+        where = "WHERE imdb_url IS NULL OR imdb_url = '' OR workflow_needs_review = TRUE"
+    elif stage == "omdb":
+        where = """
+        WHERE imdb_id IS NOT NULL
+          AND imdb_id <> ''
+          AND ((omdb_status IS NULL OR omdb_status <> 'fetched') OR workflow_needs_review = TRUE)
+        """
+    elif stage == "translation":
+        where = """
+        WHERE omdb_plot_en IS NOT NULL
+          AND omdb_plot_en <> ''
+          AND ((omdb_plot_es IS NULL OR omdb_plot_es = '') OR workflow_needs_review = TRUE)
+        """
+    else:
+        where = "WHERE workflow_status IS NULL OR workflow_status <> 'done'"
+
+    rows = con.execute(
+        f"""
+        SELECT id
+        FROM movies
+        {where}
+        ORDER BY id
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    con.close()
+
+    return [row[0] for row in rows]

@@ -9,6 +9,7 @@ try:
         api_get,
         api_post,
         api_put,
+        render_timeout_controls,
         select_ollama_model,
     )
 except ModuleNotFoundError:  # pragma: no cover
@@ -17,10 +18,12 @@ except ModuleNotFoundError:  # pragma: no cover
         api_get,
         api_post,
         api_put,
+        render_timeout_controls,
         select_ollama_model,
     )
 
 st.title("Fase 5 - Traduccion plot")
+render_timeout_controls()
 
 movie_id = st.text_input("ID concreto (opcional)", value="")
 limit = st.number_input("Limite batch", min_value=1, max_value=5000, value=20)
@@ -48,7 +51,7 @@ if st.button("Traducir plots"):
     except requests.exceptions.ReadTimeout:
         st.error(
             "Timeout esperando al backend. "
-            "Reduce el limite batch o aumenta API_LONG_TIMEOUT_SECONDS en tu .env y reinicia Streamlit."
+            "Reduce el limite batch o cambia el modo en Sidebar > HTTP timeout."
         )
     except Exception as exc:
         st.error(str(exc))
@@ -91,7 +94,7 @@ with c1:
             st.success("Traduccion completada")
             st.json(result)
         except requests.exceptions.ReadTimeout:
-            st.error("Timeout esperando al backend para este ID.")
+            st.error("Timeout esperando al backend para este ID. Prueba Sidebar > HTTP timeout.")
         except Exception as exc:
             st.error(str(exc))
 

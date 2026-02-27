@@ -3,11 +3,12 @@ from pathlib import Path
 import streamlit as st
 
 try:
-    from src.frontend.utils import api_get
+    from src.frontend.utils import api_get, render_timeout_controls
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import api_get
+    from frontend.utils import api_get, render_timeout_controls
 
 st.title("Fase 6 - Exportacion")
+render_timeout_controls()
 
 if st.button("Exportar a TSV"):
     try:
