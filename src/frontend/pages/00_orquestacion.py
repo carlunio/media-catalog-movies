@@ -9,6 +9,7 @@ try:
         LONG_TIMEOUT_SECONDS,
         api_get,
         api_post,
+        configure_page,
         render_timeout_controls,
         select_ollama_model,
     )
@@ -17,10 +18,12 @@ except ModuleNotFoundError:  # pragma: no cover
         LONG_TIMEOUT_SECONDS,
         api_get,
         api_post,
+        configure_page,
         render_timeout_controls,
         select_ollama_model,
     )
 
+configure_page()
 st.title("Fase 0 - Orquestacion LangGraph")
 render_timeout_controls()
 

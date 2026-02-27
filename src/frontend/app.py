@@ -1,11 +1,11 @@
 import streamlit as st
 
 try:
-    from src.frontend.utils import render_timeout_controls, show_backend_status
+    from src.frontend.utils import configure_page, render_timeout_controls, show_backend_status
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import render_timeout_controls, show_backend_status
+    from frontend.utils import configure_page, render_timeout_controls, show_backend_status
 
-st.set_page_config(page_title="Media Catalog Movies", layout="wide")
+configure_page()
 
 st.title("Media Catalog Movies")
 render_timeout_controls()

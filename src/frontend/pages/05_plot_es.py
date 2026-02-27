@@ -9,6 +9,7 @@ try:
         api_get,
         api_post,
         api_put,
+        configure_page,
         render_timeout_controls,
         select_ollama_model,
     )
@@ -18,10 +19,12 @@ except ModuleNotFoundError:  # pragma: no cover
         api_get,
         api_post,
         api_put,
+        configure_page,
         render_timeout_controls,
         select_ollama_model,
     )
 
+configure_page()
 st.title("Fase 5 - Traduccion plot")
 render_timeout_controls()
 

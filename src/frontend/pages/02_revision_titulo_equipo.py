@@ -3,10 +3,25 @@ import streamlit as st
 from PIL import Image, ImageOps
 
 try:
-    from src.frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put, render_timeout_controls
+    from src.frontend.utils import (
+        LONG_TIMEOUT_SECONDS,
+        api_get,
+        api_post,
+        api_put,
+        configure_page,
+        render_timeout_controls,
+    )
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import LONG_TIMEOUT_SECONDS, api_get, api_post, api_put, render_timeout_controls
+    from frontend.utils import (
+        LONG_TIMEOUT_SECONDS,
+        api_get,
+        api_post,
+        api_put,
+        configure_page,
+        render_timeout_controls,
+    )
 
+configure_page()
 st.title("Fase 2 - Revision titulo/equipo y acciones")
 render_timeout_controls()
 

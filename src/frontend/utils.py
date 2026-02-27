@@ -14,7 +14,7 @@ def _as_float(raw: str | None, default: float) -> float:
         return default
 
 
-DEFAULT_TIMEOUT_SECONDS = _as_float(os.getenv("API_TIMEOUT_SECONDS"), 30.0)
+DEFAULT_TIMEOUT_SECONDS = _as_float(os.getenv("API_TIMEOUT_SECONDS"), 180.0)
 LONG_TIMEOUT_SECONDS = _as_float(os.getenv("API_LONG_TIMEOUT_SECONDS"), 900.0)
 TIMEOUT_MODE_NORMAL = "normal"
 TIMEOUT_MODE_UNITARY = "unitary"
@@ -26,6 +26,14 @@ TIMEOUT_MODE_OPTIONS = (
 )
 TIMEOUT_MODE_SESSION_KEY = "api_timeout_mode"
 TIMEOUT_UNITARY_SESSION_KEY = "api_timeout_unitary_seconds"
+
+
+def configure_page() -> None:
+    try:
+        st.set_page_config(page_title="Media Catalog Movies", layout="wide")
+    except Exception:
+        # Ignore repeated calls when Streamlit has already configured the page.
+        pass
 
 
 def _url(path: str) -> str:
@@ -48,7 +56,7 @@ def _set_session_value(key: str, value: Any) -> None:
 
 def _normalize_timeout_mode(raw: Any) -> str:
     mode = str(raw or "").strip().lower()
-    return mode if mode in TIMEOUT_MODE_OPTIONS else TIMEOUT_MODE_NORMAL
+    return mode if mode in TIMEOUT_MODE_OPTIONS else TIMEOUT_MODE_DISABLED
 
 
 def _unitary_timeout_seconds() -> float:
@@ -62,7 +70,9 @@ def _unitary_timeout_seconds() -> float:
 
 def _effective_timeout(timeout: float | None) -> float | None:
     base_timeout = DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
-    mode = _normalize_timeout_mode(_get_session_value(TIMEOUT_MODE_SESSION_KEY, TIMEOUT_MODE_NORMAL))
+    mode = _normalize_timeout_mode(
+        _get_session_value(TIMEOUT_MODE_SESSION_KEY, TIMEOUT_MODE_NORMAL)
+    )
     if mode == TIMEOUT_MODE_DISABLED:
         return None
     if mode == TIMEOUT_MODE_UNITARY:
@@ -71,7 +81,9 @@ def _effective_timeout(timeout: float | None) -> float | None:
 
 
 def render_timeout_controls() -> None:
-    current_mode = _normalize_timeout_mode(_get_session_value(TIMEOUT_MODE_SESSION_KEY, TIMEOUT_MODE_NORMAL))
+    current_mode = _normalize_timeout_mode(
+        _get_session_value(TIMEOUT_MODE_SESSION_KEY, TIMEOUT_MODE_DISABLED)
+    )
     current_unitary = _unitary_timeout_seconds()
 
     with st.sidebar.expander("HTTP timeout", expanded=False):
@@ -102,7 +114,9 @@ def render_timeout_controls() -> None:
                 f"API_LONG_TIMEOUT_SECONDS={LONG_TIMEOUT_SECONDS:g}s."
             )
         elif mode == TIMEOUT_MODE_UNITARY:
-            st.caption(f"Unitario activo: {float(unitary_value):g}s para TODAS las llamadas.")
+            st.caption(
+                f"Unitario activo: {float(unitary_value):g}s para TODAS las llamadas."
+            )
         else:
             st.caption("Timeout desactivado: requests espera indefinidamente.")
 

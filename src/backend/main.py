@@ -20,6 +20,9 @@ from .services import export, movies, workflow
 app = FastAPI(title="Media Catalog Movies API", version="0.2.0")
 
 movies.init_table()
+_recovered_stale_runs = movies.recover_stale_running_workflows()
+if _recovered_stale_runs:
+    print(f"[startup] recovered {_recovered_stale_runs} stale workflow runs")
 
 
 @app.get("/health")

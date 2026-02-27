@@ -25,7 +25,7 @@ def export_movies_tsv(output_path: Path) -> Path:
     con = get_connection()
 
     rows = con.execute(
-        f"SELECT {', '.join(COLUMNS)} FROM movies ORDER BY id"
+        f"SELECT {', '.join(COLUMNS)} FROM movies ORDER BY LOWER(id), id"
     ).fetchall()
     con.close()
 

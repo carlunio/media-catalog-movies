@@ -340,6 +340,40 @@ def set_workflow_done(movie_id: str, *, node: str, action: str | None = None) ->
 
 
 
+def recover_stale_running_workflows(*, reason: str = "Recovered after backend restart") -> int:
+    con = get_connection()
+    rows = con.execute(
+        """
+        SELECT id
+        FROM movies
+        WHERE workflow_status = 'running'
+        """
+    ).fetchall()
+
+    stale_ids = [row[0] for row in rows]
+    if not stale_ids:
+        con.close()
+        return 0
+
+    con.execute(
+        """
+        UPDATE movies
+        SET
+            workflow_status = 'pending',
+            workflow_current_node = 'recovered',
+            workflow_last_error = CASE
+                WHEN workflow_last_error IS NULL OR workflow_last_error = '' THEN ?
+                ELSE workflow_last_error
+            END,
+            updated_at = now()
+        WHERE workflow_status = 'running'
+        """,
+        (reason,),
+    )
+    con.close()
+    return len(stale_ids)
+
+
 def increment_workflow_attempt(movie_id: str) -> int:
     con = get_connection()
     row = con.execute(
@@ -648,7 +682,7 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
             updated_at
         FROM movies
         {where}
-        ORDER BY id
+        ORDER BY LOWER(id), id
         LIMIT ?
         """,
         (limit,),
@@ -1038,7 +1072,7 @@ def movies_for_extraction(limit: int, overwrite: bool) -> list[dict[str, str]]:
         SELECT id, image_path
         FROM movies
         {where}
-        ORDER BY id
+        ORDER BY LOWER(id), id
         LIMIT ?
         """,
         (limit,),
@@ -1065,7 +1099,7 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
             manual_team_json
         FROM movies
         {where}
-        ORDER BY id
+        ORDER BY LOWER(id), id
         LIMIT ?
         """,
         (limit,),
@@ -1098,7 +1132,7 @@ def movies_for_omdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
         SELECT id, imdb_id
         FROM movies
         {where}
-        ORDER BY id
+        ORDER BY LOWER(id), id
         LIMIT ?
         """,
         (limit,),
@@ -1120,7 +1154,7 @@ def movies_for_translation(limit: int, overwrite: bool) -> list[dict[str, Any]]:
         SELECT id, omdb_plot_en
         FROM movies
         {where}
-        ORDER BY id
+        ORDER BY LOWER(id), id
         LIMIT ?
         """,
         (limit,),
@@ -1166,7 +1200,7 @@ def movie_ids_for_workflow(
         SELECT id
         FROM movies
         {where}
-        ORDER BY id
+        ORDER BY LOWER(id), id
         LIMIT ?
         """,
         (limit,),

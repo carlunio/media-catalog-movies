@@ -4,10 +4,11 @@ import pandas as pd
 import streamlit as st
 
 try:
-    from src.frontend.utils import api_get, api_post, load_stats, render_timeout_controls
+    from src.frontend.utils import api_get, api_post, configure_page, load_stats, render_timeout_controls
 except ModuleNotFoundError:  # pragma: no cover
-    from frontend.utils import api_get, api_post, load_stats, render_timeout_controls
+    from frontend.utils import api_get, api_post, configure_page, load_stats, render_timeout_controls
 
+configure_page()
 st.title("Fase 1 - Ingesta")
 render_timeout_controls()
 

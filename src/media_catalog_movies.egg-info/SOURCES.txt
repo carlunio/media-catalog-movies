@@ -27,6 +27,7 @@ src/backend/workflow/graph.py
 src/frontend/__init__.py
 src/frontend/app.py
 src/frontend/utils.py
+src/frontend/pages/00_orquestacion.py
 src/frontend/pages/01_ingesta_y_extraccion.py
 src/frontend/pages/02_revision_titulo_equipo.py
 src/frontend/pages/03_imdb.py
