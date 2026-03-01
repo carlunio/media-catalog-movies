@@ -10,3 +10,7 @@ class RunImdbRequest(BaseModel):
 
 class ManualImdbRequest(BaseModel):
     imdb_url: str
+
+
+class ManualImdbTitleEsRequest(BaseModel):
+    title_es: str | None = None

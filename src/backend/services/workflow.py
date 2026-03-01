@@ -11,14 +11,25 @@ from ..config import (
 )
 from . import movies
 
-VALID_STAGES = {"extraction", "imdb", "omdb", "translation"}
-STAGE_BUCKETS = ("extraction", "imdb", "omdb", "translation", "review", "done", "running", "unknown")
+VALID_STAGES = {"extraction", "imdb", "title_es", "omdb", "translation"}
+STAGE_BUCKETS = (
+    "extraction",
+    "imdb",
+    "title_es",
+    "omdb",
+    "translation",
+    "review",
+    "done",
+    "running",
+    "unknown",
+)
 
 WORKFLOW_GRAPH_NODES = [
     {"id": "load_movie", "label": "Load movie", "kind": "control"},
     {"id": "apply_action", "label": "Apply action", "kind": "control"},
     {"id": "extract", "label": "Extraction", "kind": "stage", "stage": "extraction"},
     {"id": "imdb", "label": "IMDb search", "kind": "stage", "stage": "imdb"},
+    {"id": "title_es", "label": "IMDb title (ES)", "kind": "stage", "stage": "title_es"},
     {"id": "omdb", "label": "OMDb fetch", "kind": "stage", "stage": "omdb"},
     {"id": "translation", "label": "Plot translation", "kind": "stage", "stage": "translation"},
     {"id": "evaluate", "label": "Evaluate", "kind": "control"},
@@ -30,7 +41,8 @@ WORKFLOW_GRAPH_EDGES = [
     {"source": "load_movie", "target": "apply_action"},
     {"source": "apply_action", "target": "extract"},
     {"source": "extract", "target": "imdb"},
-    {"source": "imdb", "target": "omdb"},
+    {"source": "imdb", "target": "title_es"},
+    {"source": "title_es", "target": "omdb"},
     {"source": "omdb", "target": "translation"},
     {"source": "translation", "target": "evaluate"},
     {"source": "evaluate", "target": "retry", "label": "route=retry"},
@@ -41,6 +53,7 @@ WORKFLOW_GRAPH_EDGES = [
 WORKFLOW_STAGE_TO_NODE = {
     "extraction": "extract",
     "imdb": "imdb",
+    "title_es": "title_es",
     "omdb": "omdb",
     "translation": "translation",
 }
@@ -76,7 +89,7 @@ def graph_definition() -> dict[str, Any]:
         "langgraph_available": is_langgraph_available(),
         "start_node": "load_movie",
         "end_node": "end",
-        "stage_order": ["extraction", "imdb", "omdb", "translation"],
+        "stage_order": ["extraction", "imdb", "title_es", "omdb", "translation"],
         "stage_to_node": WORKFLOW_STAGE_TO_NODE,
         "nodes": WORKFLOW_GRAPH_NODES,
         "edges": WORKFLOW_GRAPH_EDGES,
@@ -202,6 +215,7 @@ def run_one(
         "error": error,
         "imdb_id": movie.get("imdb_id"),
         "imdb_url": movie.get("imdb_url"),
+        "imdb_title_es_status": movie.get("imdb_title_es_status"),
         "omdb_status": movie.get("omdb_status"),
         "translation_status": movie.get("translation_status"),
         "outcome": result_state.get("outcome"),
@@ -274,6 +288,7 @@ def review_action(
         "approve": "translation",
         "retry_from_extraction": "extraction",
         "retry_from_imdb": "imdb",
+        "retry_from_title_es": "title_es",
         "retry_from_omdb": "omdb",
         "retry_from_translation": "translation",
     }

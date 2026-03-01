@@ -8,6 +8,7 @@ COLUMNS = [
     "extraction_title",
     "imdb_url",
     "imdb_id",
+    "imdb_title_es",
     "omdb_title",
     "omdb_year",
     "omdb_runtime",

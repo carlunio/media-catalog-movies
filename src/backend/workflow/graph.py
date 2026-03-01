@@ -9,20 +9,23 @@ from ..config import (
     VISION_TITLE_MODEL,
     WORKFLOW_MAX_ATTEMPTS,
 )
-from ..services import cover_extraction, imdb_links, movies, omdb_data, plot_translation
+from ..multi_value import PLOT_MULTI_SEPARATOR, split_values
+from ..services import cover_extraction, imdb_links, imdb_title_es, movies, omdb_data, plot_translation
 
-StageName = Literal["extraction", "imdb", "omdb", "translation"]
+StageName = Literal["extraction", "imdb", "title_es", "omdb", "translation"]
 
 STAGE_ORDER: dict[StageName, int] = {
     "extraction": 1,
     "imdb": 2,
-    "omdb": 3,
-    "translation": 4,
+    "title_es": 3,
+    "omdb": 4,
+    "translation": 5,
 }
 
 RETRY_STAGE_MAP: dict[str, StageName] = {
     "extraction": "extraction",
-    "imdb": "extraction",
+    "imdb": "imdb",
+    "title_es": "title_es",
     "omdb": "imdb",
     "translation": "translation",
 }
@@ -119,6 +122,7 @@ def _apply_action_node(state: WorkflowState) -> WorkflowState:
     retry_action_to_stage: dict[str, StageName] = {
         "retry_from_extraction": "extraction",
         "retry_from_imdb": "imdb",
+        "retry_from_title_es": "title_es",
         "retry_from_omdb": "omdb",
         "retry_from_translation": "translation",
     }
@@ -173,8 +177,6 @@ def _extract_node(state: WorkflowState) -> WorkflowState:
                 team=payload["team"],
                 title_raw=payload["title_raw"],
                 team_raw=payload["team_raw"],
-                title_model=payload["title_model"],
-                team_model=payload["team_model"],
             )
         except Exception as exc:
             return _with_failure(movie_id, step="extraction", error=str(exc))
@@ -205,7 +207,12 @@ def _imdb_node(state: WorkflowState) -> WorkflowState:
     if movie is None:
         return _with_failure(movie_id, step="imdb", error="Movie disappeared during IMDb search")
 
-    should_run = bool(state.get("overwrite")) or not movie.get("imdb_url")
+    effective_title = str(movie.get("manual_title") or movie.get("extraction_title") or "")
+    title_parts = split_values(effective_title)
+    imdb_url_parts = split_values(movie.get("imdb_url"))
+    imdb_incomplete = len(title_parts) > 1 and len(imdb_url_parts) != len(title_parts)
+
+    should_run = bool(state.get("overwrite")) or not movie.get("imdb_url") or imdb_incomplete
 
     if should_run:
         result = imdb_links.search_one(
@@ -234,6 +241,48 @@ def _imdb_node(state: WorkflowState) -> WorkflowState:
 
 
 
+def _title_es_node(state: WorkflowState) -> WorkflowState:
+    if state.get("failed_step") or state.get("stop_pipeline"):
+        return {}
+
+    if not _stage_enabled(state, "title_es"):
+        return {}
+
+    movie_id = state["movie_id"]
+    movies.set_workflow_running(movie_id, node="fetch_imdb_title_es", action=state.get("action"))
+
+    movie = movies.get_movie(movie_id)
+    if movie is None:
+        return _with_failure(movie_id, step="title_es", error="Movie disappeared during IMDb ES title fetch")
+
+    imdb_url = str(movie.get("imdb_url") or "").strip()
+    if not imdb_url:
+        return _with_failure(movie_id, step="title_es", error="Missing imdb_url")
+
+    title_es_parts = split_values(movie.get("imdb_title_es"))
+    imdb_url_parts = split_values(imdb_url)
+    title_es_incomplete = len(imdb_url_parts) > 1 and len(title_es_parts) != len(imdb_url_parts)
+
+    should_run = (
+        bool(state.get("overwrite"))
+        or not str(movie.get("imdb_title_es") or "").strip()
+        or title_es_incomplete
+    )
+    if should_run:
+        # Non-blocking branch: if this fails, we keep the pipeline moving.
+        imdb_title_es.fetch_one(movie_id, imdb_url=imdb_url)
+
+    refreshed = movies.get_movie(movie_id)
+    if _should_stop_after(state, "title_es"):
+        return {
+            "movie": refreshed,
+            "stop_pipeline": True,
+            "outcome": "stopped_after_title_es",
+        }
+
+    return {"movie": refreshed}
+
+
 def _omdb_node(state: WorkflowState) -> WorkflowState:
     if state.get("failed_step") or state.get("stop_pipeline"):
         return {}
@@ -251,7 +300,11 @@ def _omdb_node(state: WorkflowState) -> WorkflowState:
     if not movie.get("imdb_id"):
         return _with_failure(movie_id, step="omdb", error="Missing imdb_id")
 
-    should_run = bool(state.get("overwrite")) or movie.get("omdb_status") != "fetched"
+    imdb_id_parts = split_values(str(movie.get("imdb_id") or ""))
+    omdb_title_parts = split_values(str(movie.get("omdb_title") or ""))
+    omdb_incomplete = len(imdb_id_parts) > 1 and len(omdb_title_parts) != len(imdb_id_parts)
+
+    should_run = bool(state.get("overwrite")) or movie.get("omdb_status") != "fetched" or omdb_incomplete
 
     if should_run:
         try:
@@ -295,12 +348,15 @@ def _translation_node(state: WorkflowState) -> WorkflowState:
         movies.update_plot_translation(
             movie_id,
             plot_es=movie.get("omdb_plot_es"),
-            model=model,
             status="skipped",
             error="No omdb_plot_en to translate",
         )
     else:
-        should_run = bool(state.get("overwrite")) or not movie.get("omdb_plot_es")
+        plot_en_parts = split_values(plot_en, separator=PLOT_MULTI_SEPARATOR)
+        plot_es_parts = split_values(str(movie.get("omdb_plot_es") or ""), separator=PLOT_MULTI_SEPARATOR)
+        plot_es_incomplete = len(plot_en_parts) > 1 and len(plot_es_parts) != len(plot_en_parts)
+
+        should_run = bool(state.get("overwrite")) or not movie.get("omdb_plot_es") or plot_es_incomplete
         if should_run:
             try:
                 translated = plot_translation.translate_plot(plot_en, model=model)
@@ -310,7 +366,6 @@ def _translation_node(state: WorkflowState) -> WorkflowState:
             movies.update_plot_translation(
                 movie_id,
                 plot_es=translated,
-                model=model,
                 status="translated",
                 error=None,
             )
@@ -341,7 +396,8 @@ def _evaluate_node(state: WorkflowState) -> WorkflowState:
             return {"route": "end"}
 
         attempt = int(state.get("attempt") or 0)
-        max_attempts = int(state.get("max_attempts") or WORKFLOW_MAX_ATTEMPTS)
+        max_attempts_raw = state.get("max_attempts")
+        max_attempts = WORKFLOW_MAX_ATTEMPTS if max_attempts_raw is None else int(max_attempts_raw)
 
         if failed_step != "apply_action" and attempt < max_attempts:
             return {"route": "retry"}
@@ -418,6 +474,7 @@ def _build_graph():
     builder.add_node("apply_action", _apply_action_node)
     builder.add_node("extract", _extract_node)
     builder.add_node("imdb", _imdb_node)
+    builder.add_node("title_es", _title_es_node)
     builder.add_node("omdb", _omdb_node)
     builder.add_node("translation", _translation_node)
     builder.add_node("evaluate", _evaluate_node)
@@ -427,7 +484,8 @@ def _build_graph():
     builder.add_edge("load_movie", "apply_action")
     builder.add_edge("apply_action", "extract")
     builder.add_edge("extract", "imdb")
-    builder.add_edge("imdb", "omdb")
+    builder.add_edge("imdb", "title_es")
+    builder.add_edge("title_es", "omdb")
     builder.add_edge("omdb", "translation")
     builder.add_edge("translation", "evaluate")
 

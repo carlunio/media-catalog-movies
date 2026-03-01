@@ -2,6 +2,7 @@ from typing import Any
 
 from ..clients import ClientError, ollama_chat
 from ..config import TRANSLATION_MODEL
+from ..multi_value import PLOT_MULTI_SEPARATOR, join_values, split_values
 from . import movies
 
 SYSTEM_PROMPT = (
@@ -19,6 +20,18 @@ def translate_plot(plot_en: str, model: str) -> str:
             {"role": "user", "content": plot_en},
         ],
     )
+
+
+def _translate_multi_plot(plot_en: str, model: str) -> str:
+    parts = split_values(plot_en, separator=PLOT_MULTI_SEPARATOR)
+    if len(parts) <= 1:
+        return translate_plot(plot_en, model=model)
+
+    translated_parts: list[str] = []
+    for part in parts:
+        translated_parts.append(translate_plot(part, model=model).strip())
+
+    return join_values(translated_parts, separator=PLOT_MULTI_SEPARATOR, keep_empty=True)
 
 
 def run_batch(
@@ -42,11 +55,10 @@ def run_batch(
         plot_en = row["omdb_plot_en"]
 
         try:
-            translated = translate_plot(plot_en, model=model)
+            translated = _translate_multi_plot(plot_en, model=model)
             movies.update_plot_translation(
                 mid,
                 plot_es=translated,
-                model=model,
                 status="translated",
                 error=None,
             )
@@ -55,7 +67,6 @@ def run_batch(
             movies.update_plot_translation(
                 mid,
                 plot_es=None,
-                model=model,
                 status="error",
                 error=str(exc),
             )

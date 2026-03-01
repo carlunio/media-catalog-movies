@@ -1,1 +1,0 @@
-{"movie_id":null,"limit":1,"start_stage":"extraction","stop_after":null,"overwrite":false,"title_model":"gemma3:27b-it-qat","team_model":"qwen3-vl:32b","translation_model":"phi4:latest","max_results":10,"max_attempts":2}

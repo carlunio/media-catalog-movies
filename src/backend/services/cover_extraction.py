@@ -85,8 +85,6 @@ def extract_from_cover(
         "team": team,
         "title_raw": title_raw,
         "team_raw": team_raw,
-        "title_model": title_model,
-        "team_model": team_model,
     }
 
 
@@ -122,8 +120,6 @@ def run_batch(
                 team=payload["team"],
                 title_raw=payload["title_raw"],
                 team_raw=payload["team_raw"],
-                title_model=payload["title_model"],
-                team_model=payload["team_model"],
             )
             processed.append(
                 {

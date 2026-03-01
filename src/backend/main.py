@@ -9,7 +9,7 @@ from .config import (
     VISION_TITLE_MODEL,
     WORKFLOW_MAX_ATTEMPTS,
 )
-from .schemas.imdb import ManualImdbRequest, RunImdbRequest
+from .schemas.imdb import ManualImdbRequest, ManualImdbTitleEsRequest, RunImdbRequest
 from .schemas.ingest import IngestRequest, RunExtractRequest
 from .schemas.omdb import RunOmdbRequest, UpdateOmdbRequest
 from .schemas.review import UpdateTitleTeamRequest
@@ -23,6 +23,10 @@ movies.init_table()
 _recovered_stale_runs = movies.recover_stale_running_workflows()
 if _recovered_stale_runs:
     print(f"[startup] recovered {_recovered_stale_runs} stale workflow runs")
+
+
+def _resolve_max_attempts(value: int | None) -> int:
+    return WORKFLOW_MAX_ATTEMPTS if value is None else int(value)
 
 
 @app.get("/health")
@@ -70,7 +74,7 @@ def workflow_run(payload: WorkflowRunRequest):
             team_model=payload.team_model or VISION_TEAM_MODEL,
             translation_model=payload.translation_model or TRANSLATION_MODEL,
             max_results=payload.max_results,
-            max_attempts=payload.max_attempts or WORKFLOW_MAX_ATTEMPTS,
+            max_attempts=_resolve_max_attempts(payload.max_attempts),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -101,7 +105,7 @@ def workflow_review_action(movie_id: str, payload: WorkflowReviewRequest):
         result = workflow.review_action(
             movie_id,
             action=payload.action,
-            max_attempts=payload.max_attempts or WORKFLOW_MAX_ATTEMPTS,
+            max_attempts=_resolve_max_attempts(payload.max_attempts),
             title_model=payload.title_model or VISION_TITLE_MODEL,
             team_model=payload.team_model or VISION_TEAM_MODEL,
             translation_model=payload.translation_model or TRANSLATION_MODEL,
@@ -230,6 +234,15 @@ def set_manual_imdb(movie_id: str, payload: ManualImdbRequest):
     return {"ok": True}
 
 
+@app.put("/movies/{movie_id}/imdb-title-es")
+def set_manual_imdb_title_es(movie_id: str, payload: ManualImdbTitleEsRequest):
+    if movies.get_movie(movie_id) is None:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    movies.set_manual_imdb_title_es(movie_id, payload.title_es)
+    return {"ok": True}
+
+
 @app.put("/movies/{movie_id}/omdb")
 def update_omdb(movie_id: str, payload: UpdateOmdbRequest):
     if movies.get_movie(movie_id) is None:
@@ -247,7 +260,6 @@ def update_plot_es(movie_id: str, payload: UpdatePlotTranslationRequest):
     movies.update_plot_translation(
         movie_id,
         plot_es=payload.plot_es,
-        model="manual",
         status="manual",
         error=None,
     )

@@ -1,13 +1,16 @@
 # =========================
 # ENV
 # =========================
-include .env
+# Resolve everything relative to this Makefile so commands work even if
+# `make -f ...` is executed from another directory.
+MAKEFILE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+include $(MAKEFILE_DIR)/.env
 export
 
 # =========================
 # PYTHON / VENV
 # =========================
-VENV := .venv
+VENV := $(MAKEFILE_DIR)/.venv
 
 ifeq ($(OS),Windows_NT)
 PYTHON_BOOTSTRAP := py
@@ -29,9 +32,14 @@ UVICORN := $(VENV_BIN)/uvicorn
 STREAMLIT := $(VENV_BIN)/streamlit
 RM_VENV := rm -rf $(VENV)
 STOP_PORT = lsof -ti :$(1) | xargs -r kill || true
-STOP_BACK = (lsof -ti :$(BACK_PORT) | xargs -r kill || true); (pkill -f "uvicorn .*src.backend.main:app.*--port $(BACK_PORT)" || true)
+# On Linux, avoid pkill patterns here because they can match the shell
+# command spawned by make itself and terminate `make stop-back`.
+STOP_BACK = lsof -ti :$(BACK_PORT) | xargs -r kill || true
 STOP_FRONT = lsof -ti :$(FRONT_PORT) | xargs -r kill || true
 endif
+
+BACKEND_APP := src.backend.main:app
+FRONTEND_APP := $(MAKEFILE_DIR)/src/frontend/app.py
 
 # =========================
 # PORTS
@@ -55,12 +63,12 @@ install:
 dev-back:
 	@echo "Starting backend on port $(BACK_PORT)"
 	@$(MAKE) stop-back
-	$(UVICORN) src.backend.main:app --reload --port $(BACK_PORT)
+	$(UVICORN) $(BACKEND_APP) --reload --port $(BACK_PORT)
 
 dev-front:
 	@echo "Starting frontend on port $(FRONT_PORT)"
 	@$(MAKE) stop-front
-	$(STREAMLIT) run src/frontend/app.py --server.port $(FRONT_PORT)
+	$(STREAMLIT) run $(FRONTEND_APP) --server.port $(FRONT_PORT)
 
 dev:
 	$(MAKE) -j 2 dev-back dev-front

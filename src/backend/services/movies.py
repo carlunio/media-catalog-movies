@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..multi_value import join_values, split_values
 from ..database import get_connection
 from ..normalizers import (
     canonical_imdb_url,
@@ -14,9 +15,81 @@ from ..normalizers import (
 WORKFLOW_STAGE_ORDER = {
     "extraction": 1,
     "imdb": 2,
-    "omdb": 3,
-    "translation": 4,
+    "title_es": 3,
+    "omdb": 4,
+    "translation": 5,
 }
+
+_EFFECTIVE_TITLE_SQL = "COALESCE(NULLIF(TRIM(manual_title), ''), NULLIF(TRIM(extraction_title), ''))"
+_EFFECTIVE_TEAM_SQL = (
+    "CASE "
+    "WHEN manual_team_json IS NOT NULL "
+    "AND TRIM(CAST(manual_team_json AS VARCHAR)) NOT IN ('', '[]', 'null', 'NULL') "
+    "THEN TRIM(CAST(manual_team_json AS VARCHAR)) "
+    "ELSE TRIM(COALESCE(CAST(extraction_team_json AS VARCHAR), '')) "
+    "END"
+)
+_MISSING_EXTRACTION_SQL = (
+    f"({_EFFECTIVE_TITLE_SQL} IS NULL OR {_EFFECTIVE_TEAM_SQL} IN ('', '[]', 'null', 'NULL'))"
+)
+_TITLE_PARTS_SQL = (
+    f"(1 + LENGTH(TRIM({_EFFECTIVE_TITLE_SQL})) - LENGTH(REPLACE(TRIM({_EFFECTIVE_TITLE_SQL}), ';', '')))"
+)
+_IMDB_URL_PARTS_SQL = "(1 + LENGTH(TRIM(imdb_url)) - LENGTH(REPLACE(TRIM(imdb_url), ';', '')))"
+_IMDB_ID_PARTS_SQL = "(1 + LENGTH(TRIM(imdb_id)) - LENGTH(REPLACE(TRIM(imdb_id), ';', '')))"
+_IMDB_TITLE_ES_PARTS_SQL = (
+    "(1 + LENGTH(TRIM(imdb_title_es)) - LENGTH(REPLACE(TRIM(imdb_title_es), ';', '')))"
+)
+_OMDB_TITLE_PARTS_SQL = "(1 + LENGTH(TRIM(omdb_title)) - LENGTH(REPLACE(TRIM(omdb_title), ';', '')))"
+_PLOT_EN_PARTS_SQL = "(1 + LENGTH(TRIM(omdb_plot_en)) - LENGTH(REPLACE(TRIM(omdb_plot_en), ';', '')))"
+_PLOT_ES_PARTS_SQL = "(1 + LENGTH(TRIM(omdb_plot_es)) - LENGTH(REPLACE(TRIM(omdb_plot_es), ';', '')))"
+
+
+def _effective_title_from_dict(movie: dict[str, Any]) -> str:
+    for key in ("manual_title", "extraction_title"):
+        value = str(movie.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _effective_team_from_dict(movie: dict[str, Any]) -> list[str]:
+    manual_team = parse_json_list(movie.get("manual_team_json"))
+    if not manual_team:
+        manual_team = parse_json_list(movie.get("manual_team"))
+    if manual_team:
+        return manual_team
+
+    extraction_team = parse_json_list(movie.get("extraction_team_json"))
+    if not extraction_team:
+        extraction_team = parse_json_list(movie.get("extraction_team"))
+    return extraction_team
+
+
+def _has_complete_multi_value(base: str, candidate: str) -> bool:
+    base_parts = split_values(base)
+    if not base_parts:
+        return False
+
+    candidate_parts = split_values(candidate)
+    if not candidate_parts:
+        return False
+
+    if len(base_parts) <= 1:
+        return True
+    return len(candidate_parts) == len(base_parts)
+
+
+def _has_complete_plot_value(plot_en: str, plot_es: str) -> bool:
+    base_parts = split_values(plot_en, separator=";\n")
+    if not base_parts:
+        return False
+
+    if len(base_parts) <= 1:
+        return bool(str(plot_es or "").strip())
+
+    candidate_parts = split_values(plot_es, separator=";\n")
+    return len(candidate_parts) == len(base_parts)
 
 
 def _derive_pipeline_stage_from_dict(movie: dict[str, Any]) -> str:
@@ -28,22 +101,28 @@ def _derive_pipeline_stage_from_dict(movie: dict[str, Any]) -> str:
     if workflow_status == "running":
         return f"running:{workflow_node}" if workflow_node else "running"
 
-    extraction_title = str(movie.get("extraction_title") or "").strip()
-    extraction_team = parse_json_list(movie.get("extraction_team_json"))
-    if not extraction_title or not extraction_team:
+    effective_title = _effective_title_from_dict(movie)
+    effective_team = _effective_team_from_dict(movie)
+    if not effective_title or not effective_team:
         return "extraction"
 
     imdb_url = str(movie.get("imdb_url") or "").strip()
-    if not imdb_url:
+    if not _has_complete_multi_value(effective_title, imdb_url):
         return "imdb"
 
+    imdb_title_es = str(movie.get("imdb_title_es") or "").strip()
+    if not _has_complete_multi_value(imdb_url, imdb_title_es):
+        return "title_es"
+
     omdb_status = str(movie.get("omdb_status") or "").lower()
-    if omdb_status != "fetched":
+    imdb_id = str(movie.get("imdb_id") or "").strip()
+    omdb_title = str(movie.get("omdb_title") or "").strip()
+    if omdb_status != "fetched" or (imdb_id and not _has_complete_multi_value(imdb_id, omdb_title)):
         return "omdb"
 
     omdb_plot_en = str(movie.get("omdb_plot_en") or "").strip()
     omdb_plot_es = str(movie.get("omdb_plot_es") or "").strip()
-    if omdb_plot_en and not omdb_plot_es:
+    if omdb_plot_en and not _has_complete_plot_value(omdb_plot_en, omdb_plot_es):
         return "translation"
 
     return "done"
@@ -62,8 +141,6 @@ def init_table() -> None:
             extraction_team_json JSON,
             extraction_title_raw TEXT,
             extraction_team_raw TEXT,
-            extraction_title_model TEXT,
-            extraction_team_model TEXT,
 
             manual_title TEXT,
             manual_team_json JSON,
@@ -73,6 +150,9 @@ def init_table() -> None:
             imdb_id TEXT,
             imdb_status TEXT DEFAULT 'pending',
             imdb_last_error TEXT,
+            imdb_title_es TEXT,
+            imdb_title_es_status TEXT DEFAULT 'pending',
+            imdb_title_es_last_error TEXT,
 
             omdb_raw_json JSON,
             omdb_status TEXT DEFAULT 'pending',
@@ -100,7 +180,6 @@ def init_table() -> None:
             omdb_production TEXT,
 
             translation_status TEXT DEFAULT 'pending',
-            translation_model TEXT,
             translation_last_error TEXT,
 
             workflow_status TEXT DEFAULT 'pending',
@@ -119,6 +198,7 @@ def init_table() -> None:
     )
 
     _ensure_columns(con)
+    _clear_legacy_model_columns(con)
     con.close()
 
 
@@ -134,11 +214,29 @@ def _ensure_columns(con) -> None:
         "workflow_last_action": "TEXT",
         "workflow_last_error": "TEXT",
         "workflow_history_json": "JSON",
+        "imdb_title_es": "TEXT",
+        "imdb_title_es_status": "TEXT DEFAULT 'pending'",
+        "imdb_title_es_last_error": "TEXT",
     }
 
     for col, ddl in required_columns.items():
         if col not in existing:
             con.execute(f"ALTER TABLE movies ADD COLUMN {col} {ddl}")
+
+
+def _clear_legacy_model_columns(con) -> None:
+    existing = {row[1] for row in con.execute("PRAGMA table_info(movies)").fetchall()}
+    legacy_columns = [
+        "extraction_title_model",
+        "extraction_team_model",
+        "translation_model",
+    ]
+    to_clear = [column for column in legacy_columns if column in existing]
+    if not to_clear:
+        return
+
+    assignments = ", ".join(f"{column} = NULL" for column in to_clear)
+    con.execute(f"UPDATE movies SET {assignments}")
 
 
 
@@ -415,8 +513,6 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
             "extraction_team_json": None,
             "extraction_title_raw": None,
             "extraction_team_raw": None,
-            "extraction_title_model": None,
-            "extraction_team_model": None,
             "manual_title": None,
             "manual_team_json": None,
             "imdb_query": None,
@@ -424,6 +520,9 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
             "imdb_id": None,
             "imdb_status": "pending",
             "imdb_last_error": None,
+            "imdb_title_es": None,
+            "imdb_title_es_status": "pending",
+            "imdb_title_es_last_error": None,
             "omdb_raw_json": None,
             "omdb_status": "pending",
             "omdb_last_error": None,
@@ -449,7 +548,6 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
             "omdb_boxoffice": None,
             "omdb_production": None,
             "translation_status": "pending",
-            "translation_model": None,
             "translation_last_error": None,
         }
     elif stage == "imdb":
@@ -459,6 +557,9 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
             "imdb_id": None,
             "imdb_status": "pending",
             "imdb_last_error": None,
+            "imdb_title_es": None,
+            "imdb_title_es_status": "pending",
+            "imdb_title_es_last_error": None,
             "omdb_raw_json": None,
             "omdb_status": "pending",
             "omdb_last_error": None,
@@ -484,8 +585,13 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
             "omdb_boxoffice": None,
             "omdb_production": None,
             "translation_status": "pending",
-            "translation_model": None,
             "translation_last_error": None,
+        }
+    elif stage == "title_es":
+        updates = {
+            "imdb_title_es": None,
+            "imdb_title_es_status": "pending",
+            "imdb_title_es_last_error": None,
         }
     elif stage == "omdb":
         updates = {
@@ -514,14 +620,12 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
             "omdb_boxoffice": None,
             "omdb_production": None,
             "translation_status": "pending",
-            "translation_model": None,
             "translation_last_error": None,
         }
     elif stage == "translation":
         updates = {
             "omdb_plot_es": None,
             "translation_status": "pending",
-            "translation_model": None,
             "translation_last_error": None,
         }
     else:
@@ -618,6 +722,9 @@ def ingest_covers(
 
 def _row_to_dict(columns: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
     data = dict(zip(columns, row))
+    data.pop("extraction_title_model", None)
+    data.pop("extraction_team_model", None)
+    data.pop("translation_model", None)
     data["extraction_team"] = parse_json_list(data.pop("extraction_team_json", None))
     data["manual_team"] = parse_json_list(data.pop("manual_team_json", None))
     data["omdb_raw"] = _load_json(data.pop("omdb_raw_json", None))
@@ -633,21 +740,71 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
     where = ""
     pipeline_filter: str | None = None
     if stage == "needs_extraction":
-        where = "WHERE extraction_title IS NULL OR extraction_team_json IS NULL"
+        where = f"WHERE {_MISSING_EXTRACTION_SQL}"
     elif stage == "needs_manual_review":
         where = "WHERE manual_title IS NULL OR manual_team_json IS NULL"
     elif stage == "needs_imdb":
-        where = "WHERE imdb_url IS NULL OR imdb_url = ''"
+        where = f"""
+        WHERE imdb_url IS NULL
+          OR imdb_url = ''
+          OR (
+                {_EFFECTIVE_TITLE_SQL} IS NOT NULL
+            AND TRIM({_EFFECTIVE_TITLE_SQL}) <> ''
+            AND STRPOS(TRIM({_EFFECTIVE_TITLE_SQL}), ';') > 0
+            AND {_IMDB_URL_PARTS_SQL} <> {_TITLE_PARTS_SQL}
+          )
+        """
+    elif stage == "needs_title_es":
+        where = f"""
+        WHERE imdb_url IS NOT NULL
+          AND imdb_url <> ''
+          AND (
+                imdb_title_es IS NULL
+             OR TRIM(imdb_title_es) = ''
+             OR (
+                    STRPOS(TRIM(imdb_url), ';') > 0
+                AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
+             )
+          )
+        """
     elif stage == "needs_omdb":
-        where = "WHERE imdb_id IS NOT NULL AND imdb_id <> '' AND (omdb_status IS NULL OR omdb_status <> 'fetched')"
+        where = f"""
+        WHERE imdb_id IS NOT NULL
+          AND imdb_id <> ''
+          AND (
+                omdb_status IS NULL
+             OR omdb_status <> 'fetched'
+             OR (
+                    STRPOS(TRIM(imdb_id), ';') > 0
+                AND (
+                       omdb_title IS NULL
+                    OR TRIM(omdb_title) = ''
+                    OR {_OMDB_TITLE_PARTS_SQL} <> {_IMDB_ID_PARTS_SQL}
+                )
+             )
+          )
+        """
     elif stage == "needs_translation":
-        where = "WHERE omdb_plot_en IS NOT NULL AND omdb_plot_en <> '' AND (omdb_plot_es IS NULL OR omdb_plot_es = '')"
+        where = f"""
+        WHERE omdb_plot_en IS NOT NULL
+          AND omdb_plot_en <> ''
+          AND (
+                omdb_plot_es IS NULL
+             OR omdb_plot_es = ''
+             OR (
+                    STRPOS(TRIM(omdb_plot_en), ';') > 0
+                AND {_PLOT_ES_PARTS_SQL} <> {_PLOT_EN_PARTS_SQL}
+             )
+          )
+        """
     elif stage == "needs_workflow_review":
         where = "WHERE workflow_needs_review = TRUE"
     elif stage == "pipeline_extraction":
         pipeline_filter = "extraction"
     elif stage == "pipeline_imdb":
         pipeline_filter = "imdb"
+    elif stage == "pipeline_title_es":
+        pipeline_filter = "title_es"
     elif stage == "pipeline_omdb":
         pipeline_filter = "omdb"
     elif stage == "pipeline_translation":
@@ -669,6 +826,9 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
             imdb_url,
             imdb_id,
             imdb_status,
+            imdb_title_es,
+            imdb_title_es_status,
+            imdb_title_es_last_error,
             omdb_status,
             translation_status,
             omdb_plot_en,
@@ -703,17 +863,20 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
                 "imdb_url": row[6],
                 "imdb_id": row[7],
                 "imdb_status": row[8],
-                "omdb_status": row[9],
-                "translation_status": row[10],
-                "omdb_plot_en": row[11],
-                "omdb_plot_es": row[12],
-                "workflow_status": row[13],
-                "workflow_current_node": row[14],
-                "workflow_needs_review": bool(row[15]) if row[15] is not None else False,
-                "workflow_review_reason": row[16],
-                "workflow_attempt": row[17],
-                "workflow_last_error": row[18],
-                "updated_at": row[19],
+                "imdb_title_es": row[9],
+                "imdb_title_es_status": row[10],
+                "imdb_title_es_last_error": row[11],
+                "omdb_status": row[12],
+                "translation_status": row[13],
+                "omdb_plot_en": row[14],
+                "omdb_plot_es": row[15],
+                "workflow_status": row[16],
+                "workflow_current_node": row[17],
+                "workflow_needs_review": bool(row[18]) if row[18] is not None else False,
+                "workflow_review_reason": row[19],
+                "workflow_attempt": row[20],
+                "workflow_last_error": row[21],
+                "updated_at": row[22],
             }
         )
 
@@ -721,13 +884,16 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
             {
                 "extraction_title": row[2],
                 "extraction_team_json": row[3],
+                "manual_title": row[4],
+                "manual_team_json": row[5],
                 "imdb_url": row[6],
-                "omdb_status": row[9],
-                "omdb_plot_en": row[11],
-                "omdb_plot_es": row[12],
-                "workflow_status": row[13],
-                "workflow_current_node": row[14],
-                "workflow_needs_review": bool(row[15]) if row[15] is not None else False,
+                "imdb_title_es": row[9],
+                "omdb_status": row[12],
+                "omdb_plot_en": row[14],
+                "omdb_plot_es": row[15],
+                "workflow_status": row[16],
+                "workflow_current_node": row[17],
+                "workflow_needs_review": bool(row[18]) if row[18] is not None else False,
             }
         )
 
@@ -758,28 +924,71 @@ def get_stats() -> dict[str, int]:
 
     total = con.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
     needs_extraction = con.execute(
-        "SELECT COUNT(*) FROM movies WHERE extraction_title IS NULL OR extraction_team_json IS NULL"
+        f"SELECT COUNT(*) FROM movies WHERE {_MISSING_EXTRACTION_SQL}"
     ).fetchone()[0]
     needs_manual_review = con.execute(
         "SELECT COUNT(*) FROM movies WHERE manual_title IS NULL OR manual_team_json IS NULL"
     ).fetchone()[0]
     needs_imdb = con.execute(
-        "SELECT COUNT(*) FROM movies WHERE imdb_url IS NULL OR imdb_url = ''"
+        f"""
+        SELECT COUNT(*) FROM movies
+        WHERE imdb_url IS NULL
+           OR imdb_url = ''
+           OR (
+                 {_EFFECTIVE_TITLE_SQL} IS NOT NULL
+             AND TRIM({_EFFECTIVE_TITLE_SQL}) <> ''
+             AND STRPOS(TRIM({_EFFECTIVE_TITLE_SQL}), ';') > 0
+             AND {_IMDB_URL_PARTS_SQL} <> {_TITLE_PARTS_SQL}
+           )
+        """
+    ).fetchone()[0]
+    needs_title_es = con.execute(
+        f"""
+        SELECT COUNT(*) FROM movies
+        WHERE imdb_url IS NOT NULL
+          AND imdb_url <> ''
+          AND (
+                imdb_title_es IS NULL
+             OR TRIM(imdb_title_es) = ''
+             OR (
+                    STRPOS(TRIM(imdb_url), ';') > 0
+                AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
+             )
+          )
+        """
     ).fetchone()[0]
     needs_omdb = con.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM movies
         WHERE imdb_id IS NOT NULL
           AND imdb_id <> ''
-          AND (omdb_status IS NULL OR omdb_status <> 'fetched')
+          AND (
+                omdb_status IS NULL
+             OR omdb_status <> 'fetched'
+             OR (
+                    STRPOS(TRIM(imdb_id), ';') > 0
+                AND (
+                       omdb_title IS NULL
+                    OR TRIM(omdb_title) = ''
+                    OR {_OMDB_TITLE_PARTS_SQL} <> {_IMDB_ID_PARTS_SQL}
+                )
+             )
+          )
         """
     ).fetchone()[0]
     needs_translation = con.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM movies
         WHERE omdb_plot_en IS NOT NULL
           AND omdb_plot_en <> ''
-          AND (omdb_plot_es IS NULL OR omdb_plot_es = '')
+          AND (
+                omdb_plot_es IS NULL
+             OR omdb_plot_es = ''
+             OR (
+                    STRPOS(TRIM(omdb_plot_en), ';') > 0
+                AND {_PLOT_ES_PARTS_SQL} <> {_PLOT_EN_PARTS_SQL}
+             )
+          )
         """
     ).fetchone()[0]
     needs_workflow_review = con.execute(
@@ -793,6 +1002,7 @@ def get_stats() -> dict[str, int]:
         "needs_extraction": needs_extraction,
         "needs_manual_review": needs_manual_review,
         "needs_imdb": needs_imdb,
+        "needs_title_es": needs_title_es,
         "needs_omdb": needs_omdb,
         "needs_translation": needs_translation,
         "needs_workflow_review": needs_workflow_review,
@@ -827,8 +1037,6 @@ def update_extraction(
     team: list[str],
     title_raw: str,
     team_raw: str,
-    title_model: str,
-    team_model: str,
 ) -> None:
     con = get_connection()
     con.execute(
@@ -839,8 +1047,6 @@ def update_extraction(
             extraction_team_json = ?,
             extraction_title_raw = ?,
             extraction_team_raw = ?,
-            extraction_title_model = ?,
-            extraction_team_model = ?,
             workflow_status = 'pending',
             workflow_last_error = NULL,
             updated_at = now()
@@ -851,8 +1057,6 @@ def update_extraction(
             _serialize_json(team),
             title_raw,
             team_raw,
-            title_model,
-            team_model,
             movie_id,
         ),
     )
@@ -868,8 +1072,20 @@ def update_imdb(
     imdb_status: str,
     imdb_last_error: str | None = None,
 ) -> None:
-    canonical_url = canonical_imdb_url(imdb_url) if imdb_url else None
-    imdb_id = extract_imdb_id(canonical_url or imdb_url)
+    canonical_urls: list[str] = []
+    for raw_url in split_values(imdb_url):
+        canonical = canonical_imdb_url(raw_url)
+        if canonical:
+            canonical_urls.append(canonical)
+
+    canonical_url = join_values(canonical_urls) if canonical_urls else None
+    if canonical_url and len(canonical_urls) == 1:
+        canonical_url = canonical_urls[0]
+
+    imdb_ids = [extract_imdb_id(url) for url in canonical_urls]
+    imdb_id = join_values([item for item in imdb_ids if item]) if imdb_ids else None
+    if imdb_id and len(imdb_ids) == 1:
+        imdb_id = imdb_ids[0]
 
     con = get_connection()
     con.execute(
@@ -881,6 +1097,35 @@ def update_imdb(
             imdb_id = ?,
             imdb_status = ?,
             imdb_last_error = ?,
+            imdb_title_es = NULL,
+            imdb_title_es_status = 'pending',
+            imdb_title_es_last_error = NULL,
+            omdb_raw_json = NULL,
+            omdb_status = 'pending',
+            omdb_last_error = NULL,
+            omdb_title = NULL,
+            omdb_year = NULL,
+            omdb_rated = NULL,
+            omdb_released = NULL,
+            omdb_runtime = NULL,
+            omdb_genre = NULL,
+            omdb_director = NULL,
+            omdb_writer = NULL,
+            omdb_actors = NULL,
+            omdb_plot_en = NULL,
+            omdb_plot_es = NULL,
+            omdb_language = NULL,
+            omdb_country = NULL,
+            omdb_awards = NULL,
+            omdb_poster = NULL,
+            omdb_imdbrating = NULL,
+            omdb_imdbvotes = NULL,
+            omdb_type = NULL,
+            omdb_dvd = NULL,
+            omdb_boxoffice = NULL,
+            omdb_production = NULL,
+            translation_status = 'pending',
+            translation_last_error = NULL,
             workflow_status = 'pending',
             workflow_last_error = NULL,
             updated_at = now()
@@ -893,9 +1138,20 @@ def update_imdb(
 
 
 def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
-    canonical_url = canonical_imdb_url(imdb_url)
-    if not canonical_url:
+    raw_urls = split_values(imdb_url)
+    if not raw_urls:
         raise ValueError("Invalid IMDb URL")
+
+    canonical_urls: list[str] = []
+    for raw_url in raw_urls:
+        canonical = canonical_imdb_url(raw_url)
+        if not canonical:
+            raise ValueError(f"Invalid IMDb URL: {raw_url}")
+        canonical_urls.append(canonical)
+
+    canonical_url = canonical_urls[0] if len(canonical_urls) == 1 else join_values(canonical_urls)
+    imdb_ids = [extract_imdb_id(url) for url in canonical_urls]
+    imdb_id = imdb_ids[0] if len(imdb_ids) == 1 else join_values(imdb_ids)
 
     con = get_connection()
     con.execute(
@@ -906,6 +1162,35 @@ def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
             imdb_id = ?,
             imdb_status = 'found',
             imdb_last_error = NULL,
+            imdb_title_es = NULL,
+            imdb_title_es_status = 'pending',
+            imdb_title_es_last_error = NULL,
+            omdb_raw_json = NULL,
+            omdb_status = 'pending',
+            omdb_last_error = NULL,
+            omdb_title = NULL,
+            omdb_year = NULL,
+            omdb_rated = NULL,
+            omdb_released = NULL,
+            omdb_runtime = NULL,
+            omdb_genre = NULL,
+            omdb_director = NULL,
+            omdb_writer = NULL,
+            omdb_actors = NULL,
+            omdb_plot_en = NULL,
+            omdb_plot_es = NULL,
+            omdb_language = NULL,
+            omdb_country = NULL,
+            omdb_awards = NULL,
+            omdb_poster = NULL,
+            omdb_imdbrating = NULL,
+            omdb_imdbvotes = NULL,
+            omdb_type = NULL,
+            omdb_dvd = NULL,
+            omdb_boxoffice = NULL,
+            omdb_production = NULL,
+            translation_status = 'pending',
+            translation_last_error = NULL,
             workflow_status = 'pending',
             workflow_needs_review = FALSE,
             workflow_review_reason = NULL,
@@ -913,10 +1198,43 @@ def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
             updated_at = now()
         WHERE id = ?
         """,
-        (canonical_url, extract_imdb_id(canonical_url), movie_id),
+        (canonical_url, imdb_id, movie_id),
     )
     con.close()
 
+
+
+def update_imdb_title_es(
+    movie_id: str,
+    *,
+    title_es: str | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    con = get_connection()
+    con.execute(
+        """
+        UPDATE movies
+        SET
+            imdb_title_es = ?,
+            imdb_title_es_status = ?,
+            imdb_title_es_last_error = ?,
+            workflow_status = 'pending',
+            workflow_last_error = NULL,
+            updated_at = now()
+        WHERE id = ?
+        """,
+        (title_es, status, error, movie_id),
+    )
+    con.close()
+
+
+def set_manual_imdb_title_es(movie_id: str, title_es: str | None) -> None:
+    clean = str(title_es or "").strip()
+    if clean:
+        update_imdb_title_es(movie_id, title_es=clean, status="manual", error=None)
+    else:
+        update_imdb_title_es(movie_id, title_es=None, status="pending", error=None)
 
 
 def update_omdb(movie_id: str, omdb_payload: dict[str, Any], status: str, error: str | None) -> None:
@@ -1037,7 +1355,6 @@ def update_plot_translation(
     movie_id: str,
     *,
     plot_es: str | None,
-    model: str | None,
     status: str,
     error: str | None = None,
 ) -> None:
@@ -1047,7 +1364,6 @@ def update_plot_translation(
         UPDATE movies
         SET
             omdb_plot_es = ?,
-            translation_model = ?,
             translation_status = ?,
             translation_last_error = ?,
             workflow_status = 'pending',
@@ -1055,7 +1371,7 @@ def update_plot_translation(
             updated_at = now()
         WHERE id = ?
         """,
-        (plot_es, model, status, error, movie_id),
+        (plot_es, status, error, movie_id),
     )
     con.close()
 
@@ -1065,7 +1381,7 @@ def movies_for_extraction(limit: int, overwrite: bool) -> list[dict[str, str]]:
     con = get_connection()
     where = ""
     if not overwrite:
-        where = "WHERE extraction_title IS NULL OR extraction_team_json IS NULL"
+        where = f"WHERE {_MISSING_EXTRACTION_SQL}"
 
     rows = con.execute(
         f"""
@@ -1121,11 +1437,54 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
 
 
 
+def movies_for_imdb_title_es(limit: int, overwrite: bool) -> list[dict[str, Any]]:
+    con = get_connection()
+    where = "WHERE imdb_url IS NOT NULL AND imdb_url <> ''"
+    if not overwrite:
+        where += f"""
+        AND (
+              imdb_title_es IS NULL
+           OR TRIM(imdb_title_es) = ''
+           OR (
+                  STRPOS(TRIM(imdb_url), ';') > 0
+              AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
+           )
+        )
+        """
+
+    rows = con.execute(
+        f"""
+        SELECT id, imdb_url, imdb_id
+        FROM movies
+        {where}
+        ORDER BY LOWER(id), id
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    con.close()
+
+    return [{"id": row[0], "imdb_url": row[1], "imdb_id": row[2]} for row in rows]
+
+
 def movies_for_omdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con = get_connection()
     where = "WHERE imdb_id IS NOT NULL AND imdb_id <> ''"
     if not overwrite:
-        where += " AND (omdb_status IS NULL OR omdb_status <> 'fetched')"
+        where += f"""
+        AND (
+              omdb_status IS NULL
+           OR omdb_status <> 'fetched'
+           OR (
+                  STRPOS(TRIM(imdb_id), ';') > 0
+              AND (
+                     omdb_title IS NULL
+                  OR TRIM(omdb_title) = ''
+                  OR {_OMDB_TITLE_PARTS_SQL} <> {_IMDB_ID_PARTS_SQL}
+              )
+           )
+        )
+        """
 
     rows = con.execute(
         f"""
@@ -1147,7 +1506,16 @@ def movies_for_translation(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con = get_connection()
     where = "WHERE omdb_plot_en IS NOT NULL AND omdb_plot_en <> ''"
     if not overwrite:
-        where += " AND (omdb_plot_es IS NULL OR omdb_plot_es = '')"
+        where += f"""
+        AND (
+              omdb_plot_es IS NULL
+           OR omdb_plot_es = ''
+           OR (
+                  STRPOS(TRIM(omdb_plot_en), ';') > 0
+              AND {_PLOT_ES_PARTS_SQL} <> {_PLOT_EN_PARTS_SQL}
+           )
+        )
+        """
 
     rows = con.execute(
         f"""
@@ -1177,20 +1545,61 @@ def movie_ids_for_workflow(
     if overwrite:
         where = ""
     elif stage == "extraction":
-        where = "WHERE extraction_title IS NULL OR extraction_team_json IS NULL OR workflow_needs_review = TRUE"
+        where = f"WHERE {_MISSING_EXTRACTION_SQL} OR workflow_needs_review = TRUE"
     elif stage == "imdb":
-        where = "WHERE imdb_url IS NULL OR imdb_url = '' OR workflow_needs_review = TRUE"
+        where = f"""
+        WHERE imdb_url IS NULL
+           OR imdb_url = ''
+           OR (
+                 {_EFFECTIVE_TITLE_SQL} IS NOT NULL
+             AND TRIM({_EFFECTIVE_TITLE_SQL}) <> ''
+             AND STRPOS(TRIM({_EFFECTIVE_TITLE_SQL}), ';') > 0
+             AND {_IMDB_URL_PARTS_SQL} <> {_TITLE_PARTS_SQL}
+           )
+           OR workflow_needs_review = TRUE
+        """
+    elif stage == "title_es":
+        where = f"""
+        WHERE imdb_url IS NOT NULL
+          AND imdb_url <> ''
+          AND (
+                (imdb_title_es IS NULL OR TRIM(imdb_title_es) = '')
+             OR (
+                    STRPOS(TRIM(imdb_url), ';') > 0
+                AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
+             )
+             OR workflow_needs_review = TRUE
+          )
+        """
     elif stage == "omdb":
-        where = """
+        where = f"""
         WHERE imdb_id IS NOT NULL
           AND imdb_id <> ''
-          AND ((omdb_status IS NULL OR omdb_status <> 'fetched') OR workflow_needs_review = TRUE)
+          AND (
+                (omdb_status IS NULL OR omdb_status <> 'fetched')
+             OR (
+                    STRPOS(TRIM(imdb_id), ';') > 0
+                AND (
+                       omdb_title IS NULL
+                    OR TRIM(omdb_title) = ''
+                    OR {_OMDB_TITLE_PARTS_SQL} <> {_IMDB_ID_PARTS_SQL}
+                )
+             )
+             OR workflow_needs_review = TRUE
+          )
         """
     elif stage == "translation":
-        where = """
+        where = f"""
         WHERE omdb_plot_en IS NOT NULL
           AND omdb_plot_en <> ''
-          AND ((omdb_plot_es IS NULL OR omdb_plot_es = '') OR workflow_needs_review = TRUE)
+          AND (
+                (omdb_plot_es IS NULL OR omdb_plot_es = '')
+             OR (
+                    STRPOS(TRIM(omdb_plot_en), ';') > 0
+                AND {_PLOT_ES_PARTS_SQL} <> {_PLOT_EN_PARTS_SQL}
+             )
+             OR workflow_needs_review = TRUE
+          )
         """
     else:
         where = "WHERE workflow_status IS NULL OR workflow_status <> 'done'"

@@ -2,11 +2,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-WorkflowStage = Literal["extraction", "imdb", "omdb", "translation"]
+WorkflowStage = Literal["extraction", "imdb", "title_es", "omdb", "translation"]
 WorkflowReviewAction = Literal[
     "approve",
     "retry_from_extraction",
     "retry_from_imdb",
+    "retry_from_title_es",
     "retry_from_omdb",
     "retry_from_translation",
 ]

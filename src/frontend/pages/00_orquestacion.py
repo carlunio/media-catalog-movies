@@ -9,18 +9,24 @@ try:
         LONG_TIMEOUT_SECONDS,
         api_get,
         api_post,
+        infer_review_stage,
         configure_page,
         render_timeout_controls,
+        select_movie_id,
         select_ollama_model,
+        set_selected_movie_id,
     )
 except ModuleNotFoundError:  # pragma: no cover
     from frontend.utils import (
         LONG_TIMEOUT_SECONDS,
         api_get,
         api_post,
+        infer_review_stage,
         configure_page,
         render_timeout_controls,
+        select_movie_id,
         select_ollama_model,
+        set_selected_movie_id,
     )
 
 configure_page()
@@ -39,6 +45,7 @@ def _build_workflow_dot(definition: dict) -> str:
     stage_colors = {
         "extraction": "#d9f2ff",
         "imdb": "#e2f7dc",
+        "title_es": "#dff0e2",
         "omdb": "#fff4cf",
         "translation": "#f8def8",
     }
@@ -93,6 +100,14 @@ def _build_workflow_dot(definition: dict) -> str:
     return "\n".join(lines)
 
 
+def _switch_page(target: str) -> None:
+    switch_fn = getattr(st, "switch_page", None)
+    if callable(switch_fn):
+        switch_fn(target)
+    else:
+        st.info("Tu version de Streamlit no soporta switch_page.")
+
+
 st.subheader("Grafo")
 graph_def: dict = {}
 try:
@@ -105,7 +120,7 @@ try:
 
     dot_graph = _build_workflow_dot(graph_def)
     try:
-        st.graphviz_chart(dot_graph, use_container_width=True)
+        st.graphviz_chart(dot_graph, width="stretch")
     except Exception:
         st.code(dot_graph, language="dot")
 except Exception as exc:
@@ -147,14 +162,15 @@ except Exception as exc:
     st.info("No se pudo cargar el snapshot de workflow.")
 
 stage_counts = snapshot.get("stage_counts", {})
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
 c1.metric("Extraccion", stage_counts.get("extraction", 0))
 c2.metric("IMDb", stage_counts.get("imdb", 0))
-c3.metric("OMDb", stage_counts.get("omdb", 0))
-c4.metric("Traduccion", stage_counts.get("translation", 0))
-c5.metric("Review", stage_counts.get("review", 0))
-c6.metric("Done", stage_counts.get("done", 0))
-c7.metric("Running", stage_counts.get("running", 0))
+c3.metric("IMDb Titulo ES", stage_counts.get("title_es", 0))
+c4.metric("OMDb", stage_counts.get("omdb", 0))
+c5.metric("Traduccion", stage_counts.get("translation", 0))
+c6.metric("Review", stage_counts.get("review", 0))
+c7.metric("Done", stage_counts.get("done", 0))
+c8.metric("Running", stage_counts.get("running", 0))
 
 with st.expander("Detalle de estado de workflow", expanded=False):
     col_status, col_running = st.columns(2)
@@ -164,7 +180,7 @@ with st.expander("Detalle de estado de workflow", expanded=False):
             df_status = pd.DataFrame(
                 [{"workflow_status": key, "count": value} for key, value in status_counts.items()]
             ).sort_values("workflow_status")
-            st.dataframe(df_status, use_container_width=True)
+            st.dataframe(df_status, width="stretch")
         else:
             st.info("Sin datos de workflow_status")
 
@@ -174,7 +190,7 @@ with st.expander("Detalle de estado de workflow", expanded=False):
             df_running = pd.DataFrame(
                 [{"node": key, "count": value} for key, value in running_nodes.items()]
             ).sort_values("count", ascending=False)
-            st.dataframe(df_running, use_container_width=True)
+            st.dataframe(df_running, width="stretch")
         else:
             st.info("No hay nodos en ejecucion")
 
@@ -190,8 +206,12 @@ run_limit = st.number_input(
     step=1,
     key="orq_run_limit",
 )
-start_stage = st.selectbox("Nodo inicial", ["extraction", "imdb", "omdb", "translation"], index=0)
-stop_selection = st.selectbox("Parar despues de", ["full", "extraction", "imdb", "omdb", "translation"], index=0)
+start_stage = st.selectbox("Nodo inicial", ["extraction", "imdb", "title_es", "omdb", "translation"], index=0)
+stop_selection = st.selectbox(
+    "Parar despues de",
+    ["full", "extraction", "imdb", "title_es", "omdb", "translation"],
+    index=0,
+)
 stop_after = None if stop_selection == "full" else stop_selection
 overwrite = st.checkbox("Sobrescribir/rehacer nodos", value=False, key="orq_run_overwrite")
 max_results = st.number_input("Resultados maximos IMDb", min_value=1, max_value=30, value=10, step=1)
@@ -241,21 +261,75 @@ st.subheader("Cola de revision")
 review_queue = snapshot.get("review_queue", [])
 st.caption(f"Peliculas en cola de review: {snapshot.get('review_queue_size', 0)}")
 
+review_rows_detailed: list[dict] = []
+try:
+    review_rows_detailed = api_get(
+        "/movies",
+        params={"stage": "needs_workflow_review", "limit": int(review_limit)},
+    )
+except Exception:
+    review_rows_detailed = []
+
 if review_queue:
     df_review = pd.DataFrame(review_queue)
+    if not df_review.empty:
+        df_review["review_stage"] = [
+            infer_review_stage(row) or "unknown" for row in df_review.to_dict(orient="records")
+        ]
     show_review_cols = [
         "id",
+        "review_stage",
         "pipeline_stage",
         "workflow_current_node",
         "workflow_review_reason",
         "workflow_attempt",
         "updated_at",
     ]
-    st.dataframe(df_review[show_review_cols], use_container_width=True)
+    st.dataframe(df_review[show_review_cols], width="stretch")
     default_target = str(df_review.iloc[0]["id"])
 else:
     st.info("No hay peliculas pendientes de review.")
     default_target = ""
+
+selected_review_id = ""
+selected_review_stage = None
+if review_rows_detailed:
+    st.markdown("#### Busqueda rapida en review")
+    selected_review_id = select_movie_id(
+        review_rows_detailed,
+        label="Buscar pelicula de review",
+        key="orq_review_selector",
+    )
+    set_selected_movie_id(selected_review_id)
+    selected_row = next((row for row in review_rows_detailed if row.get("id") == selected_review_id), None)
+    if selected_row:
+        selected_review_stage = infer_review_stage(selected_row)
+        st.caption(
+            f"Seleccionada `{selected_review_id}` | "
+            f"fase de fallo detectada: `{selected_review_stage or 'unknown'}`"
+        )
+
+        nav_f2, nav_fail, nav_all = st.columns(3)
+        with nav_f2:
+            if st.button("Abrir Fase 2", width="stretch", key="orq_to_f2"):
+                _switch_page("pages/02_revision_titulo_equipo.py")
+        with nav_fail:
+            if st.button("Abrir fase del fallo", width="stretch", key="orq_to_fail"):
+                page_map = {
+                    "extraction": "pages/02_revision_titulo_equipo.py",
+                    "imdb": "pages/03_imdb.py",
+                    "title_es": "pages/03_imdb.py",
+                    "omdb": "pages/04_omdb.py",
+                    "translation": "pages/05_plot_es.py",
+                }
+                page = page_map.get(selected_review_stage or "", "pages/02_revision_titulo_equipo.py")
+                _switch_page(page)
+        with nav_all:
+            if st.button("Abrir Orquestacion", width="stretch", key="orq_to_orq"):
+                _switch_page("pages/00_orquestacion.py")
+
+if selected_review_id:
+    default_target = selected_review_id or default_target
 
 target_id = st.text_input("ID para accion de review", value=default_target)
 review_reason = st.text_input("Motivo para marcar review manual", value="")
@@ -286,6 +360,7 @@ with action_col2:
             "approve",
             "retry_from_extraction",
             "retry_from_imdb",
+            "retry_from_title_es",
             "retry_from_omdb",
             "retry_from_translation",
         ],
@@ -298,7 +373,14 @@ with action_col2:
             try:
                 result = api_post(
                     f"/workflow/review/{target_id.strip()}",
-                    json={"action": review_action, "max_attempts": int(max_attempts)},
+                    json={
+                        "action": review_action,
+                        "max_attempts": int(max_attempts),
+                        "title_model": title_model,
+                        "team_model": team_model,
+                        "translation_model": translation_model,
+                        "max_results": int(max_results),
+                    },
                     timeout=LONG_TIMEOUT_SECONDS,
                 )
                 st.success("Accion ejecutada")
@@ -315,6 +397,7 @@ stage_options = {
     "Todas": None,
     "Extraccion": "pipeline_extraction",
     "IMDb": "pipeline_imdb",
+    "IMDb Titulo ES": "pipeline_title_es",
     "OMDb": "pipeline_omdb",
     "Traduccion": "pipeline_translation",
     "Review": "pipeline_review",
@@ -339,12 +422,13 @@ try:
             "workflow_needs_review",
             "workflow_review_reason",
             "imdb_status",
+            "imdb_title_es_status",
             "omdb_status",
             "translation_status",
             "updated_at",
         ]
         present_cols = [col for col in cols if col in df.columns]
-        st.dataframe(df[present_cols], use_container_width=True)
+        st.dataframe(df[present_cols], width="stretch")
     else:
         st.info("No hay peliculas en este filtro.")
 except Exception as exc:

@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import requests
 
 from ..config import IMDB_MAX_RESULTS, IMDB_SLEEP_SECONDS, REQUEST_TIMEOUT_SECONDS
+from ..multi_value import join_values, split_values
 from ..normalizers import canonical_imdb_url, extract_imdb_id
 from . import movies
 
@@ -63,6 +64,43 @@ def _canonical_from_candidate(value: str) -> str | None:
             return f"https://www.imdb.com/title/{imdb_id}/"
 
     return None
+
+
+def _parse_team_segment(value: str) -> list[str]:
+    normalized = value.replace("\n", ",")
+    return [part.strip() for part in normalized.split(",") if part.strip()]
+
+
+def _flatten_team_values(team_values: list[str]) -> list[str]:
+    out: list[str] = []
+    for value in team_values:
+        out.extend(_parse_team_segment(value))
+    return out
+
+
+def _team_segments_for_titles(team_values: list[str], title_count: int) -> list[list[str]]:
+    if title_count <= 1:
+        return [_flatten_team_values(team_values)]
+
+    if len(team_values) == title_count:
+        return [_parse_team_segment(segment) for segment in team_values]
+
+    merged = join_values(team_values)
+    merged_parts = split_values(merged)
+    if len(merged_parts) == title_count:
+        return [_parse_team_segment(segment) for segment in merged_parts]
+
+    fallback = _flatten_team_values(team_values)
+    return [fallback for _ in range(title_count)]
+
+
+def _split_titles(title: str | None) -> list[str]:
+    titles = split_values(title)
+    if titles:
+        return titles
+
+    fallback = " ".join(str(title or "").split())
+    return [fallback] if fallback else []
 
 
 def _build_search_terms(title: str | None, team: list[str]) -> list[str]:
@@ -150,24 +188,12 @@ def _find_best_imdb_url_imdb_find(
     return None, None, saw_candidates
 
 
-def _search_and_store(movie_row: dict[str, Any], max_results: int) -> dict[str, Any]:
-    movie_id = movie_row["id"]
-    title = movie_row.get("manual_title") or movie_row.get("extraction_title")
-    team = movie_row.get("manual_team") or movie_row.get("extraction_team") or []
-
+def _search_single_title(title: str, team: list[str], max_results: int) -> dict[str, Any]:
     search_terms = _build_search_terms(title, team)
     google_queries = _build_google_queries(search_terms)
 
     if not search_terms:
-        movies.update_imdb(
-            movie_id,
-            imdb_query="",
-            imdb_url=None,
-            imdb_status="error",
-            imdb_last_error="Not enough metadata to build query",
-        )
         return {
-            "id": movie_id,
             "status": "error",
             "query": "",
             "error": "Not enough metadata",
@@ -189,15 +215,7 @@ def _search_and_store(movie_row: dict[str, Any], max_results: int) -> dict[str, 
         google_error = str(exc)
 
     if best_url:
-        movies.update_imdb(
-            movie_id,
-            imdb_query=used_google_query or google_queries[0],
-            imdb_url=best_url,
-            imdb_status="found",
-            imdb_last_error=None,
-        )
         return {
-            "id": movie_id,
             "status": "found",
             "query": used_google_query or google_queries[0],
             "imdb_url": best_url,
@@ -215,15 +233,7 @@ def _search_and_store(movie_row: dict[str, Any], max_results: int) -> dict[str, 
         imdb_find_error = str(exc)
 
     if best_url:
-        movies.update_imdb(
-            movie_id,
-            imdb_query=f"imdb-find:{used_imdb_find_term or search_terms[0]}",
-            imdb_url=best_url,
-            imdb_status="found",
-            imdb_last_error=None,
-        )
         return {
-            "id": movie_id,
             "status": "found",
             "query": f"imdb-find:{used_imdb_find_term or search_terms[0]}",
             "imdb_url": best_url,
@@ -231,35 +241,97 @@ def _search_and_store(movie_row: dict[str, Any], max_results: int) -> dict[str, 
         }
 
     first_query = google_queries[0] if google_queries else search_terms[0]
-
     errors = [message for message in [google_error, imdb_find_error] if message]
     if errors and not google_saw_results and not imdb_find_saw_candidates:
-        error_text = " ; ".join(errors)
+        return {
+            "status": "error",
+            "query": first_query,
+            "error": " ; ".join(errors),
+        }
+
+    return {
+        "status": "not_found",
+        "query": first_query,
+        "error": "No IMDb URL found after trying Google and IMDb find",
+    }
+
+
+def _search_and_store(movie_row: dict[str, Any], max_results: int) -> dict[str, Any]:
+    movie_id = movie_row["id"]
+    raw_title = movie_row.get("manual_title") or movie_row.get("extraction_title")
+    raw_team_values = [str(item or "").strip() for item in (movie_row.get("manual_team") or movie_row.get("extraction_team") or [])]
+    raw_team_values = [item for item in raw_team_values if item]
+
+    titles = _split_titles(raw_title)
+    if not titles:
         movies.update_imdb(
             movie_id,
-            imdb_query=first_query,
+            imdb_query="",
             imdb_url=None,
             imdb_status="error",
-            imdb_last_error=error_text,
+            imdb_last_error="Not enough metadata to build query",
         )
         return {
             "id": movie_id,
             "status": "error",
-            "query": first_query,
-            "error": error_text,
+            "query": "",
+            "error": "Not enough metadata",
         }
+
+    team_per_title = _team_segments_for_titles(raw_team_values, len(titles))
+
+    item_results: list[dict[str, Any]] = []
+    for index, title in enumerate(titles):
+        team = team_per_title[index] if index < len(team_per_title) else []
+        single = _search_single_title(title, team, max_results=max_results)
+        single["title_index"] = index
+        single["title_input"] = title
+        item_results.append(single)
+
+    urls = [str(item.get("imdb_url") or "").strip() for item in item_results if item.get("status") == "found"]
+    queries = [str(item.get("query") or "").strip() for item in item_results if str(item.get("query") or "").strip()]
+
+    if len(urls) == len(titles):
+        imdb_query = queries[0] if len(queries) == 1 else join_values(queries)
+        imdb_url = urls[0] if len(urls) == 1 else join_values(urls)
+
+        movies.update_imdb(
+            movie_id,
+            imdb_query=imdb_query,
+            imdb_url=imdb_url,
+            imdb_status="found",
+            imdb_last_error=None,
+        )
+        return {
+            "id": movie_id,
+            "status": "found",
+            "query": imdb_query,
+            "imdb_url": imdb_url,
+            "items": item_results,
+        }
+
+    failed_items = [item for item in item_results if item.get("status") != "found"]
+    status = "error" if any(item.get("status") == "error" for item in failed_items) else "not_found"
+    fallback_query = join_values(queries) or join_values(titles)
+    error_parts = [
+        f"[{int(item.get('title_index', 0)) + 1}] {item.get('title_input')}: {item.get('error') or item.get('status')}"
+        for item in failed_items
+    ]
 
     movies.update_imdb(
         movie_id,
-        imdb_query=first_query,
+        imdb_query=fallback_query,
         imdb_url=None,
-        imdb_status="not_found",
-        imdb_last_error="No IMDb URL found after trying Google and IMDb find",
+        imdb_status=status,
+        imdb_last_error=" | ".join(error_parts),
     )
+
     return {
         "id": movie_id,
-        "status": "not_found",
-        "query": first_query,
+        "status": status,
+        "query": fallback_query,
+        "error": " | ".join(error_parts),
+        "items": item_results,
     }
 
 
@@ -294,6 +366,17 @@ def run_batch(
     }
 
 
+def _imdb_links_complete(movie: dict[str, Any]) -> bool:
+    raw_title = movie.get("manual_title") or movie.get("extraction_title")
+    titles = _split_titles(raw_title)
+    urls = split_values(movie.get("imdb_url"))
+    if not urls:
+        return False
+    if len(titles) <= 1:
+        return True
+    return len(urls) == len(titles)
+
+
 def search_one(
     movie_id: str,
     *,
@@ -304,7 +387,7 @@ def search_one(
     if not movie:
         return {"id": movie_id, "status": "error", "error": "Movie not found"}
 
-    if not overwrite and movie.get("imdb_url"):
+    if not overwrite and _imdb_links_complete(movie):
         return {
             "id": movie_id,
             "status": "skipped",
