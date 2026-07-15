@@ -10,7 +10,7 @@ from .config import (
     WORKFLOW_MAX_ATTEMPTS,
 )
 from .schemas.imdb import ManualImdbRequest, ManualImdbTitleEsRequest, RunImdbRequest
-from .schemas.ingest import IngestRequest, RebindCoversRequest, RunExtractRequest
+from .schemas.ingest import IngestRequest, RunExtractRequest
 from .schemas.omdb import RunOmdbRequest, UpdateOmdbRequest
 from .schemas.review import UpdateTitleTeamRequest
 from .schemas.translation import RunTranslationRequest, UpdatePlotTranslationRequest
@@ -71,20 +71,6 @@ def ingest_covers(payload: IngestRequest):
             recursive=payload.recursive,
             extensions=payload.extensions,
             overwrite_existing_paths=payload.overwrite_existing_paths,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/covers/rebind")
-def rebind_covers(payload: RebindCoversRequest):
-    try:
-        return movies.rebind_image_paths(
-            covers_dir=payload.folder,
-            recursive=payload.recursive,
-            extensions=payload.extensions,
-            limit=payload.limit,
-            only_missing=payload.only_missing,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

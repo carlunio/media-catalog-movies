@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import requests
 import streamlit as st
 from PIL import Image, ImageOps
@@ -41,10 +44,21 @@ configure_page()
 render_icon_heading("Fase 2 - Título", icon="pen-to-square", level=1)
 render_timeout_controls()
 
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", Path(__file__).resolve().parents[3])).resolve()
 
-def _load_image_with_orientation(path: str):
+
+def _resolve_image_path(raw_path: str | None) -> Path | None:
+    text = str(raw_path or "").strip()
+    if not text or text.startswith(("http://", "https://")):
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _load_image_with_orientation(path: Path):
     with Image.open(path) as image:
-        # Respect EXIF orientation so portrait covers are not shown rotated.
         return ImageOps.exif_transpose(image).copy()
 
 
@@ -164,16 +178,17 @@ left, right = st.columns([1, 2])
 
 with left:
     st.write(f"ID: {selected_id}")
-    if movie.get("image_path"):
+    image_path = _resolve_image_path(movie.get("image_path"))
+    if image_path:
         try:
-            st.image(_load_image_with_orientation(movie["image_path"]), width="stretch")
+            st.image(_load_image_with_orientation(image_path), width="stretch")
         except (FileNotFoundError, OSError) as exc:
             st.warning(f"No se pudo cargar la imagen: {exc}")
 
 with right:
     render_icon_heading("Extracción", icon="tag", level=3)
     st.write("Título extraído:", movie.get("extraction_title") or "")
-    st.write("Equipo extraido:", ", ".join(movie.get("extraction_team", [])))
+    st.write("Equipo extraído:", ", ".join(movie.get("extraction_team", [])))
     if review_stage:
         st.caption(f"Origen de revisión detectado: `{stage_ui_label(review_stage)}`")
 

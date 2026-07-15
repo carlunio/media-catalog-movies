@@ -188,6 +188,87 @@ def test_item_options_use_cinema_sections_csv(tmp_path, monkeypatch):
     ]
 
 
+
+def test_cover_read_stores_repo_relative_image_paths(tmp_path, monkeypatch):
+    source_dir = tmp_path.parent / f"{tmp_path.name}_covers_source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "P0001.jpeg").write_bytes(b"caratula-prueba")
+
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    response = client.post(
+        "/covers/read",
+        json={
+            "folder": str(source_dir),
+            "recursive": True,
+            "extensions": ["jpeg"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["inserted"] == 1
+    assert payload["copied_to_project"] == 1
+    assert (tmp_path / "input" / "P0001.jpeg").read_bytes() == b"caratula-prueba"
+
+    movie_response = client.get("/movies/P0001")
+    assert movie_response.status_code == 200
+    movie = movie_response.json()
+    assert movie["image_path"] == "input/P0001.jpeg"
+    assert movie["image_filename"] == "P0001.jpeg"
+
+    (source_dir / "P0001.jpeg").write_bytes(b"caratula-nueva")
+    second_response = client.post(
+        "/covers/read",
+        json={
+            "folder": str(source_dir),
+            "recursive": True,
+            "extensions": ["jpeg"],
+            "overwrite_existing_paths": False,
+        },
+    )
+    assert second_response.status_code == 200
+    second_payload = second_response.json()
+    assert second_payload["skipped"] == 1
+    assert second_payload["copied_to_project"] == 0
+    assert (tmp_path / "input" / "P0001.jpeg").read_bytes() == b"caratula-prueba"
+
+
+def test_startup_normalizes_existing_database_image_paths(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True)
+    cover = input_dir / "P0001.jpg"
+    cover.write_bytes(b"caratula")
+
+    db_path = tmp_path / "movies.duckdb"
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            CREATE TABLE movies_core (
+                id TEXT PRIMARY KEY,
+                image_path TEXT NOT NULL,
+                image_filename TEXT,
+                created_at TIMESTAMP DEFAULT now(),
+                updated_at TIMESTAMP DEFAULT now()
+            )
+            """)
+        con.execute(
+            """
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', ?, 'P0001.jpg')
+            """,
+            [str(cover.resolve())],
+        )
+
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    response = client.get("/movies/P0001")
+
+    assert response.status_code == 200
+    assert response.json()["image_path"] == "input/P0001.jpg"
+
+
 def test_prepare_items_is_idempotent_and_preserves_manual_edits(tmp_path, monkeypatch):
     (tmp_path / "secciones.csv").write_text(
         "id sección,título\n434,Cine - Películas - DVD\n",

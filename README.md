@@ -74,6 +74,7 @@ make test
 ## Modelo de datos
 
 La base activa de la aplicación es `data/movies.duckdb`.
+Las rutas internas de carátulas se guardan relativas al proyecto, por ejemplo `data/input/P0001.jpeg`; los snapshots y backups externos son independientes y usan `BBDD_DIR`.
 
 El esquema interno está normalizado por áreas:
 
@@ -138,7 +139,7 @@ La pantalla `Datos` permite publicar, importar, listar y limpiar snapshots desde
 
 - `APP_CHANNEL`: canal opcional mostrado en UI, por ejemplo `dev`.
 - `DB_PATH`: ruta del fichero DuckDB.
-- `COVERS_DIR`: carpeta por defecto para leer carátulas.
+- `COVERS_DIR`: carpeta relativa del repo para leer carátulas; por defecto `data/input`. Las rutas de carátulas se guardan relativas al proyecto.
 - `EXPORTS_DIR`: carpeta reservada para los archivos de exportación.
 - `TC_SECTIONS_CSV_PATH`: CSV que define las secciones disponibles de cine.
 - `IMPORTAMATIC_OTHERS_FIXED_COST`: gastos fijos usados por la plantilla Importamatic de Otros.

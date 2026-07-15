@@ -30,6 +30,7 @@
 - Se añaden comandos `make lint`, `make format`, `make test`, `make update-repo`, `make update` y `make ensure-env`.
 
 ### Cambiado
+- Las rutas internas de carátulas pasan a guardarse relativas al proyecto y se elimina la reconciliación manual de rutas en la UI.
 - Se corrige la prioridad del título inicial en `items`: primero título español de IMDb, después título revisado/extraído y por último título original.
 - La pantalla de catálogo comercial pasa a llamarse `Formulario`.
 - La construcción del árbol de secciones TC se extrae a `src/backend/services/tc_sections.py` para reducir responsabilidades en `catalog.py`.

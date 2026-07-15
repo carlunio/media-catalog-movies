@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path, PureWindowsPath
+import shutil
 from typing import Any
+
+from ..config import DEFAULT_COVERS_DIR, PROJECT_ROOT
 
 from ..omdb_dictionaries import translate_omdb_field
 
@@ -139,6 +143,106 @@ def ensure_table(con) -> None:
 
 def _is_blank(value: Any) -> bool:
     return not str(value or "").strip()
+
+
+_BACKSLASH = chr(92)
+
+
+def _is_windows_absolute_path(path_text: str) -> bool:
+    win_path = PureWindowsPath(path_text)
+    return bool(win_path.drive and win_path.root)
+
+
+def _stored_image_path(path: str | Path) -> str:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _basename_from_path(path_text: str) -> str | None:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return None
+    win_name = PureWindowsPath(raw).name
+    if win_name:
+        return win_name
+    normalized = raw.replace(_BACKSLASH, "/")
+    name = normalized.rsplit("/", 1)[-1].strip()
+    return name or None
+
+
+def _copy_inside_project(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT)
+        return resolved
+    except ValueError:
+        destination = DEFAULT_COVERS_DIR / resolved.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.resolve() != resolved:
+            shutil.copy2(resolved, destination)
+        return destination.resolve()
+
+
+def normalize_image_path_value(value: Any) -> str | None:
+    current = str(value or "").strip()
+    if not current:
+        return None
+    if current.startswith(("http://", "https://")):
+        return current
+
+    is_windows_absolute = _is_windows_absolute_path(current)
+    name = _basename_from_path(current)
+
+    if not (is_windows_absolute and not Path(current).is_absolute()):
+        candidate = Path(current.replace(_BACKSLASH, "/")).expanduser()
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        resolved = candidate.resolve()
+        if resolved.exists() and resolved.is_file():
+            return _stored_image_path(_copy_inside_project(resolved))
+        try:
+            return resolved.relative_to(PROJECT_ROOT).as_posix()
+        except ValueError:
+            pass
+
+    if (Path(current).is_absolute() or is_windows_absolute) and name:
+        return _stored_image_path(DEFAULT_COVERS_DIR / name)
+
+    return current.replace(_BACKSLASH, "/")
+
+
+def normalize_image_paths(con) -> int:
+    ensure_table(con)
+    rows = con.execute(
+        f"""
+        SELECT id, image_path
+        FROM {TABLE_NAME}
+        WHERE image_path IS NOT NULL
+          AND TRIM(image_path) <> ''
+        """
+    ).fetchall()
+
+    updated = 0
+    for item_id, raw_path in rows:
+        normalized = normalize_image_path_value(raw_path)
+        current = str(raw_path or "").strip()
+        if normalized and normalized != current:
+            con.execute(
+                f"""
+                UPDATE {TABLE_NAME}
+                SET image_path = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (normalized, item_id),
+            )
+            updated += 1
+    return updated
 
 
 def _relation_names(con) -> set[str]:

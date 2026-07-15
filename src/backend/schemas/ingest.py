@@ -8,14 +8,6 @@ class IngestRequest(BaseModel):
     overwrite_existing_paths: bool = False
 
 
-class RebindCoversRequest(BaseModel):
-    folder: str | None = None
-    recursive: bool = True
-    extensions: list[str] | None = None
-    limit: int = Field(default=50000, ge=1, le=200000)
-    only_missing: bool = True
-
-
 class RunExtractRequest(BaseModel):
     movie_id: str | None = None
     limit: int = Field(default=20, ge=1, le=5000)

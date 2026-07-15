@@ -53,45 +53,6 @@ if st.button("Leer carpeta"):
     except Exception as exc:
         st.error(str(exc))
 
-render_icon_heading("Reconciliar rutas locales", icon="link", level=2)
-rebind_folder = st.text_input("Carpeta local para reconciliar", value=default_folder)
-rb_c1, rb_c2, rb_c3 = st.columns([1, 1, 1.5])
-with rb_c1:
-    rebind_recursive = st.checkbox("Buscar en subcarpetas", value=True, key="rebind_recursive")
-with rb_c2:
-    rebind_only_missing = st.checkbox(
-        "Solo rutas rotas",
-        value=True,
-        key="rebind_only_missing",
-    )
-with rb_c3:
-    rebind_limit = st.number_input(
-        "Límite de películas",
-        min_value=1,
-        max_value=200000,
-        value=50000,
-        step=1000,
-        key="rebind_limit",
-    )
-
-if st.button("Reconciliar rutas"):
-    ext = [item.strip() for item in extensions_text.split(",") if item.strip()]
-    try:
-        result = api_post(
-            "/covers/rebind",
-            json={
-                "folder": rebind_folder or None,
-                "recursive": bool(rebind_recursive),
-                "extensions": ext,
-                "limit": int(rebind_limit),
-                "only_missing": bool(rebind_only_missing),
-            },
-        )
-        st.success("Reconciliación completada")
-        st.json(result)
-    except Exception as exc:
-        st.error(str(exc))
-
 st.divider()
 
 st.info("La orquestación y la vista de grafo están en la página `Fase 0 - Orquestación LangGraph`.")

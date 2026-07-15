@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,8 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 configure_page()
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", Path(__file__).resolve().parents[3])).resolve()
+
 render_icon_heading("Fase 6 - Formulario", icon="clipboard-list", level=1)
 render_timeout_controls()
 
@@ -125,7 +128,7 @@ def _resolve_image_path(raw_path: Any) -> Path | None:
 
     path = Path(text).expanduser()
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = PROJECT_ROOT / path
     return path.resolve()
 
 

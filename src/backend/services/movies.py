@@ -1,16 +1,16 @@
 import json
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from ..config import DEFAULT_COVERS_DIR
+from ..config import DEFAULT_COVERS_DIR, PROJECT_ROOT
 from ..multi_value import join_values, split_values
 from ..database import get_connection
 from ..omdb_dictionaries import translate_omdb_field, translate_omdb_fields
 from ..normalizers import (
     canonical_imdb_url,
-    ensure_abs_path,
     extract_imdb_id,
     parse_json_list,
 )
@@ -309,6 +309,7 @@ def ensure_schema(con) -> None:
     _create_normalized_tables(con)
     _migrate_from_legacy_table(con)
     _ensure_all_companion_rows(con)
+    _normalize_stored_image_paths(con)
     _recreate_movies_view(con)
 
 
@@ -1242,7 +1243,56 @@ def _normalize_extensions(extensions: list[str] | None = None) -> set[str]:
 
 def _resolve_covers_dir(covers_dir: str | Path | None = None) -> Path:
     raw = DEFAULT_COVERS_DIR if covers_dir is None else covers_dir
-    return Path(raw).expanduser().resolve()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _is_windows_absolute_path(path_text: str) -> bool:
+    win_path = PureWindowsPath(path_text)
+    return bool(win_path.drive and win_path.root)
+
+
+def _stored_image_path(path: str | Path) -> str:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _resolve_stored_path(path_text: str | None) -> Path | None:
+    raw = str(path_text or "").strip()
+    if not raw or raw.startswith(("http://", "https://")):
+        return None
+    if _is_windows_absolute_path(raw) and not Path(raw).is_absolute():
+        return None
+    path = Path(raw.replace("\\", "/")).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _project_cover_path(path: str | Path) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT)
+        return resolved
+    except ValueError:
+        return (DEFAULT_COVERS_DIR / resolved.name).resolve()
+
+
+def _cover_inside_project(path: str | Path) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    destination = _project_cover_path(resolved)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination != resolved:
+        shutil.copy2(resolved, destination)
+    return destination
 
 
 def _path_candidates_from_text(path_text: str | None) -> list[Path]:
@@ -1274,11 +1324,18 @@ def _path_candidates_from_text(path_text: str | None) -> list[Path]:
             _push("/" + "/".join(win_parts[1:]))
 
     out: list[Path] = []
+    seen_paths: set[str] = set()
     for item in variants:
         try:
-            out.append(Path(item).expanduser())
+            candidate = _resolve_stored_path(item)
         except Exception:
             continue
+        if candidate is None:
+            continue
+        key = candidate.as_posix()
+        if key not in seen_paths:
+            seen_paths.add(key)
+            out.append(candidate)
     return out
 
 
@@ -1304,11 +1361,78 @@ def _basename_candidates(image_path: str | None, image_filename: str | None) -> 
 
     _push(image_filename)
     if image_path:
-        normalized = str(image_path).strip().replace("\\", "/")
+        raw = str(image_path).strip()
+        _push(PureWindowsPath(raw).name)
+        normalized = raw.replace("\\", "/")
         if normalized:
             _push(normalized.rsplit("/", 1)[-1])
     return names
 
+
+def _portable_cover_path(
+    *,
+    movie_id: str,
+    image_path: str | None,
+    image_filename: str | None,
+    covers_dir: Path,
+    recursive: bool,
+    extensions: set[str],
+) -> str | None:
+    resolved = _resolve_local_cover_path(
+        movie_id=movie_id,
+        image_path=image_path,
+        image_filename=image_filename,
+        covers_dir=covers_dir,
+        recursive=recursive,
+        extensions=extensions,
+    )
+    if resolved is not None:
+        return _stored_image_path(_cover_inside_project(resolved))
+
+    current = str(image_path or "").strip()
+    names = _basename_candidates(current, image_filename)
+    if not names:
+        return None
+
+    if Path(current).is_absolute() or _is_windows_absolute_path(current):
+        return _stored_image_path(DEFAULT_COVERS_DIR / names[0])
+
+    return current.replace("\\", "/")
+
+
+def _normalize_stored_image_paths(con) -> int:
+    ext_set = _normalize_extensions()
+    rows = con.execute(
+        f"""
+        SELECT id, image_path, image_filename
+        FROM {CORE_TABLE}
+        WHERE image_path IS NOT NULL
+          AND TRIM(image_path) <> ''
+        """
+    ).fetchall()
+
+    updated = 0
+    for movie_id, raw_path, image_filename in rows:
+        current = str(raw_path or "").strip()
+        normalized = _portable_cover_path(
+            movie_id=str(movie_id or "").strip(),
+            image_path=current,
+            image_filename=str(image_filename or "").strip(),
+            covers_dir=DEFAULT_COVERS_DIR,
+            recursive=True,
+            extensions=ext_set,
+        )
+        if normalized and normalized != current:
+            con.execute(
+                f"""
+                UPDATE {CORE_TABLE}
+                SET image_path = ?, updated_at = now()
+                WHERE id = ?
+                """,
+                (normalized, movie_id),
+            )
+            updated += 1
+    return updated
 
 def _resolve_local_cover_path(
     *,
@@ -1319,10 +1443,12 @@ def _resolve_local_cover_path(
     recursive: bool,
     extensions: set[str],
     filename_index: dict[str, Path] | None = None,
+    prefer_existing_path: bool = True,
 ) -> Path | None:
-    existing = _first_existing_path(_path_candidates_from_text(image_path))
-    if existing is not None:
-        return existing
+    if prefer_existing_path:
+        existing = _first_existing_path(_path_candidates_from_text(image_path))
+        if existing is not None:
+            return existing
 
     name_candidates = _basename_candidates(image_path, image_filename)
     for extension in sorted(extensions):
@@ -1402,9 +1528,11 @@ def ensure_local_image_path(
         con.close()
         return None
 
-    resolved_path = ensure_abs_path(resolved)
-    resolved_filename = resolved.name
-    if resolved_path != current_path or resolved_filename != current_filename:
+    storage_path = _cover_inside_project(resolved)
+    stored_path = _stored_image_path(storage_path)
+    resolved_path = storage_path.as_posix()
+    resolved_filename = storage_path.name
+    if stored_path != current_path or resolved_filename != current_filename:
         con.execute(
             f"""
             UPDATE {CORE_TABLE}
@@ -1414,7 +1542,7 @@ def ensure_local_image_path(
                 updated_at = now()
             WHERE id = ?
             """,
-            (resolved_path, resolved_filename, movie_id),
+            (stored_path, resolved_filename, movie_id),
         )
     con.close()
     return resolved_path
@@ -1502,115 +1630,6 @@ def audit_cover_name_format(
     }
 
 
-def rebind_image_paths(
-    *,
-    covers_dir: str | Path | None = None,
-    recursive: bool = True,
-    extensions: list[str] | None = None,
-    limit: int = 50000,
-    only_missing: bool = True,
-) -> dict[str, Any]:
-    if limit < 1:
-        raise ValueError("limit must be >= 1")
-
-    folder = _resolve_covers_dir(covers_dir)
-    if not folder.exists() or not folder.is_dir():
-        raise ValueError(f"Invalid folder: {folder}")
-
-    ext_set = _normalize_extensions(extensions)
-    pattern = "**/*" if recursive else "*"
-
-    filename_index: dict[str, Path] = {}
-    for path in sorted(folder.glob(pattern)):
-        if not path.is_file() or path.suffix.lower() not in ext_set:
-            continue
-        key = path.name.lower()
-        if key not in filename_index:
-            filename_index[key] = path.resolve()
-
-    con = get_connection()
-    rows = con.execute(
-        """
-        SELECT id, image_path, image_filename
-        FROM movies
-        ORDER BY LOWER(id), id
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-
-    checked = 0
-    missing_before = 0
-    updated = 0
-    unchanged = 0
-    unresolved = 0
-    unresolved_ids: list[str] = []
-
-    for row in rows:
-        movie_id = str(row[0] or "").strip()
-        if not movie_id:
-            continue
-        checked += 1
-
-        current_path = str(row[1] or "").strip()
-        current_filename = str(row[2] or "").strip()
-        existing = _first_existing_path(_path_candidates_from_text(current_path))
-        is_missing = existing is None
-        if is_missing:
-            missing_before += 1
-
-        if only_missing and not is_missing:
-            unchanged += 1
-            continue
-
-        resolved = _resolve_local_cover_path(
-            movie_id=movie_id,
-            image_path=current_path,
-            image_filename=current_filename,
-            covers_dir=folder,
-            recursive=recursive,
-            extensions=ext_set,
-            filename_index=filename_index,
-        )
-        if resolved is None:
-            unresolved += 1
-            if len(unresolved_ids) < 100:
-                unresolved_ids.append(movie_id)
-            continue
-
-        resolved_path = ensure_abs_path(resolved)
-        resolved_filename = resolved.name
-        if current_path == resolved_path and current_filename == resolved_filename:
-            unchanged += 1
-            continue
-
-        con.execute(
-            f"""
-            UPDATE {CORE_TABLE}
-            SET
-                image_path = ?,
-                image_filename = ?,
-                updated_at = now()
-            WHERE id = ?
-            """,
-            (resolved_path, resolved_filename, movie_id),
-        )
-        updated += 1
-
-    con.close()
-
-    return {
-        "covers_dir": str(folder),
-        "checked": checked,
-        "missing_before": missing_before,
-        "updated": updated,
-        "unchanged": unchanged,
-        "unresolved": unresolved,
-        "unresolved_ids": unresolved_ids,
-        "only_missing": bool(only_missing),
-        "recursive": bool(recursive),
-    }
-
 
 def ingest_covers(
     folder: str,
@@ -1638,37 +1657,54 @@ def ingest_covers(
     inserted = 0
     updated = 0
     skipped = 0
+    copied_to_project = 0
 
     for path in files:
         movie_id = path.stem
-        abs_path = ensure_abs_path(path)
+        source_path = path.resolve()
+        storage_path = _project_cover_path(source_path)
+        stored_path = _stored_image_path(storage_path)
+        stored_filename = storage_path.name
 
         row = con.execute(
             f"SELECT image_path FROM {CORE_TABLE} WHERE id = ?",
             (movie_id,),
         ).fetchone()
 
+        def _copy_if_needed() -> None:
+            nonlocal copied_to_project
+            if storage_path != source_path:
+                storage_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, storage_path)
+                copied_to_project += 1
+
         if row is None:
+            _copy_if_needed()
             con.execute(
                 f"""
                 INSERT INTO {CORE_TABLE} (id, image_path, image_filename, created_at, updated_at)
                 VALUES (?, ?, ?, now(), now())
                 """,
-                (movie_id, abs_path, path.name),
+                (movie_id, stored_path, stored_filename),
             )
             _ensure_companion_rows_for_movie(con, movie_id)
             inserted += 1
             continue
 
-        current_path = row[0]
-        if overwrite_existing_paths and current_path != abs_path:
+        current_path = str(row[0] or "").strip()
+        if current_path == stored_path:
+            if not storage_path.exists():
+                _copy_if_needed()
+            skipped += 1
+        elif overwrite_existing_paths:
+            _copy_if_needed()
             con.execute(
                 f"""
                 UPDATE {CORE_TABLE}
                 SET image_path = ?, image_filename = ?, updated_at = now()
                 WHERE id = ?
                 """,
-                (abs_path, path.name, movie_id),
+                (stored_path, stored_filename, movie_id),
             )
             updated += 1
         else:
@@ -1682,8 +1718,8 @@ def ingest_covers(
         "inserted": inserted,
         "updated": updated,
         "skipped": skipped,
+        "copied_to_project": copied_to_project,
     }
-
 
 
 def _row_to_dict(columns: list[str], row: tuple[Any, ...]) -> dict[str, Any]:

@@ -336,6 +336,7 @@ def ensure_schema(con) -> None:
     items_repo.ensure_table(con)
     items_repo.backfill_omdb_structured_fields(con)
     items_repo.normalize_translated_fields(con)
+    items_repo.normalize_image_paths(con)
     _sync_allowed_values_table(con)
     _sync_tc_sections_table(con)
     _ensure_export_view(con)
@@ -351,6 +352,7 @@ def prepare() -> int:
         created = items_repo.insert_missing_from_movies(con)
         items_repo.backfill_omdb_structured_fields(con)
         items_repo.normalize_translated_fields(con)
+        items_repo.normalize_image_paths(con)
         return created
 
 
@@ -368,6 +370,8 @@ def update_item(item_id: str, fields: dict[str, Any]) -> dict[str, Any]:
     updates = {key: value for key, value in fields.items() if key in EDITABLE_COLUMNS}
     if "tc_section" in updates:
         updates["tc_section"] = normalize_tc_section_value(updates["tc_section"])
+    if "image_path" in updates:
+        updates["image_path"] = items_repo.normalize_image_path_value(updates["image_path"])
     for field_name in EDITABLE_COLUMNS - {"sale_price", "tc_section"}:
         if field_name in updates:
             updates[field_name] = _clean_optional_text(updates[field_name])
