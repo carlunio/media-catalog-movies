@@ -195,12 +195,17 @@ with right:
     default_title = movie.get("manual_title") or movie.get("extraction_title") or ""
     default_team = ", ".join(movie.get("manual_team") or movie.get("extraction_team") or [])
 
-    with st.form("review_form"):
-        title = st.text_input("Título revisado", value=default_title)
+    with st.form(f"review_form_{selected_id}"):
+        title = st.text_input(
+            "Título revisado",
+            value=default_title,
+            key=f"review_title_{selected_id}_manual_title",
+        )
         team_text = st.text_area(
             "Equipo revisado (coma/salto de línea; usa ';' para separar por película)",
             value=default_team,
             height=120,
+            key=f"review_title_{selected_id}_manual_team",
         )
         save = st.form_submit_button("Guardar cambios")
 

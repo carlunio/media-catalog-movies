@@ -70,6 +70,13 @@ def _value_parts(text: str | None) -> int:
 
 
 def _needs_imdb_title_fields(row: dict) -> bool:
+    manual_title_es = str(row.get("imdb_title_es") or "").strip()
+    if (
+        str(row.get("imdb_title_es_status") or "").strip().lower() == "manual"
+        and manual_title_es
+    ):
+        return False
+
     imdb_url = str(row.get("imdb_url") or "").strip()
     if not imdb_url:
         return False
@@ -315,6 +322,7 @@ with right:
         manual_url = st.text_input(
             "IMDb URL manual (usa ';' para varias películas)",
             value=movie.get("imdb_url") or "",
+            key=f"imdb_{selected_id}_manual_url",
         )
     with url_c2:
         if st.button("Guardar URL", width="stretch"):
@@ -326,7 +334,11 @@ with right:
 
     es_c1, _ = st.columns([2, 3])
     with es_c1:
-        manual_title_es = st.text_input("Título ES manual", value=movie.get("imdb_title_es") or "")
+        manual_title_es = st.text_input(
+            "Título ES manual",
+            value=movie.get("imdb_title_es") or "",
+            key=f"imdb_{selected_id}_manual_title_es",
+        )
 
     save_c1, _ = st.columns([1.8, 3.2])
     with save_c1:

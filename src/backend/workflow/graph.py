@@ -273,6 +273,20 @@ def _title_es_node(state: WorkflowState) -> WorkflowState:
     if movie is None:
         return _with_failure(movie_id, step="title_es", error="La película desapareció durante la descarga del título ES de IMDb")
 
+    has_manual_title_es = (
+        str(movie.get("imdb_title_es_status") or "").strip().lower() == "manual"
+        and bool(str(movie.get("imdb_title_es") or "").strip())
+    )
+    if has_manual_title_es:
+        refreshed = movies.get_movie(movie_id)
+        if _should_stop_after(state, "title_es"):
+            return {
+                "movie": refreshed,
+                "stop_pipeline": True,
+                "outcome": "stopped_after_title_es",
+            }
+        return {"movie": refreshed}
+
     imdb_url = str(movie.get("imdb_url") or "").strip()
     if not imdb_url:
         return _with_failure(movie_id, step="title_es", error="Falta imdb_url")

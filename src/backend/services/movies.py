@@ -180,6 +180,13 @@ def _has_manual_override_from_dict(movie: dict[str, Any]) -> bool:
     return bool(manual_team)
 
 
+def _has_manual_imdb_title_es_from_dict(movie: dict[str, Any]) -> bool:
+    return (
+        str(movie.get("imdb_title_es_status") or "").strip().lower() == "manual"
+        and bool(str(movie.get("imdb_title_es") or "").strip())
+    )
+
+
 def _has_complete_multi_value(base: str, candidate: str) -> bool:
     base_parts = split_values(base)
     if not base_parts:
@@ -1079,14 +1086,15 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
     stage = stage.strip().lower()
     updates: dict[str, Any]
 
+    current_movie = get_movie(movie_id) or {}
+    preserve_manual_imdb_title_es = _has_manual_imdb_title_es_from_dict(current_movie)
+
     if stage == "extraction":
         updates = {
             "extraction_title": None,
             "extraction_team_json": None,
             "extraction_title_raw": None,
             "extraction_team_raw": None,
-            "manual_title": None,
-            "manual_team_json": None,
             "imdb_query": None,
             "imdb_url": None,
             "imdb_id": None,
@@ -1211,6 +1219,14 @@ def reset_from_stage(movie_id: str, stage: str) -> None:
         }
     else:
         raise ValueError(f"Unknown stage: {stage}")
+
+    if preserve_manual_imdb_title_es:
+        for field_name in (
+            "imdb_title_es",
+            "imdb_title_es_status",
+            "imdb_title_es_last_error",
+        ):
+            updates.pop(field_name, None)
 
     updates["workflow_needs_review"] = False
     updates["workflow_review_reason"] = None
@@ -1760,6 +1776,7 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
         where = f"""
         WHERE imdb_url IS NOT NULL
           AND imdb_url <> ''
+          AND COALESCE(imdb_title_es_status, '') <> 'manual'
           AND (
                 imdb_title_es IS NULL
              OR TRIM(imdb_title_es) = ''
@@ -1956,6 +1973,7 @@ def get_stats() -> dict[str, int]:
         SELECT COUNT(*) FROM movies
         WHERE imdb_url IS NOT NULL
           AND imdb_url <> ''
+          AND COALESCE(imdb_title_es_status, '') <> 'manual'
           AND (
                 imdb_title_es IS NULL
              OR TRIM(imdb_title_es) = ''
@@ -2056,14 +2074,52 @@ def update_extraction(
 
 
 
-def update_imdb(
-    movie_id: str,
-    *,
-    imdb_query: str,
-    imdb_url: str | None,
-    imdb_status: str,
-    imdb_last_error: str | None = None,
-) -> None:
+def _imdb_downstream_reset_fields(*, preserve_manual_title_es: bool = False) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "imdb_title_es": None,
+        "imdb_title_es_status": "pending",
+        "imdb_title_es_last_error": None,
+        "imdb_title_original": None,
+        "imdb_title_original_status": "pending",
+        "imdb_title_original_last_error": None,
+        "omdb_raw_json": None,
+        "omdb_status": "pending",
+        "omdb_last_error": None,
+        "omdb_title": None,
+        "omdb_year": None,
+        "omdb_rated": None,
+        "omdb_released": None,
+        "omdb_runtime": None,
+        "omdb_genre": None,
+        "omdb_director": None,
+        "omdb_writer": None,
+        "omdb_actors": None,
+        "omdb_plot_en": None,
+        "omdb_plot_es": None,
+        "omdb_language": None,
+        "omdb_country": None,
+        "omdb_awards": None,
+        "omdb_poster": None,
+        "omdb_imdbrating": None,
+        "omdb_imdbvotes": None,
+        "omdb_type": None,
+        "omdb_dvd": None,
+        "omdb_boxoffice": None,
+        "omdb_production": None,
+        "translation_status": "pending",
+        "translation_last_error": None,
+    }
+    if preserve_manual_title_es:
+        for field_name in (
+            "imdb_title_es",
+            "imdb_title_es_status",
+            "imdb_title_es_last_error",
+        ):
+            fields.pop(field_name, None)
+    return fields
+
+
+def _canonical_imdb_fields(imdb_url: str | None) -> tuple[str | None, str | None]:
     canonical_urls: list[str] = []
     for raw_url in split_values(imdb_url):
         canonical = canonical_imdb_url(raw_url)
@@ -2078,52 +2134,41 @@ def update_imdb(
     imdb_id = join_values([item for item in imdb_ids if item]) if imdb_ids else None
     if imdb_id and len(imdb_ids) == 1:
         imdb_id = imdb_ids[0]
+    return canonical_url, imdb_id
 
-    _update_workflow_fields(
-        movie_id,
-        {
-            "imdb_query": imdb_query,
-            "imdb_url": canonical_url,
-            "imdb_id": imdb_id,
-            "imdb_status": imdb_status,
-            "imdb_last_error": imdb_last_error,
-            "imdb_title_es": None,
-            "imdb_title_es_status": "pending",
-            "imdb_title_es_last_error": None,
-            "imdb_title_original": None,
-            "imdb_title_original_status": "pending",
-            "imdb_title_original_last_error": None,
-            "omdb_raw_json": None,
-            "omdb_status": "pending",
-            "omdb_last_error": None,
-            "omdb_title": None,
-            "omdb_year": None,
-            "omdb_rated": None,
-            "omdb_released": None,
-            "omdb_runtime": None,
-            "omdb_genre": None,
-            "omdb_director": None,
-            "omdb_writer": None,
-            "omdb_actors": None,
-            "omdb_plot_en": None,
-            "omdb_plot_es": None,
-            "omdb_language": None,
-            "omdb_country": None,
-            "omdb_awards": None,
-            "omdb_poster": None,
-            "omdb_imdbrating": None,
-            "omdb_imdbvotes": None,
-            "omdb_type": None,
-            "omdb_dvd": None,
-            "omdb_boxoffice": None,
-            "omdb_production": None,
-            "translation_status": "pending",
-            "translation_last_error": None,
-            "workflow_status": "pending",
-            "workflow_last_error": None,
-        },
+
+def update_imdb(
+    movie_id: str,
+    *,
+    imdb_query: str,
+    imdb_url: str | None,
+    imdb_status: str,
+    imdb_last_error: str | None = None,
+) -> None:
+    canonical_url, imdb_id = _canonical_imdb_fields(imdb_url)
+    current_movie = get_movie(movie_id) or {}
+    imdb_changed = (
+        canonical_url != str(current_movie.get("imdb_url") or "").strip()
+        or imdb_id != str(current_movie.get("imdb_id") or "").strip()
     )
 
+    fields: dict[str, Any] = {
+        "imdb_query": imdb_query,
+        "imdb_url": canonical_url,
+        "imdb_id": imdb_id,
+        "imdb_status": imdb_status,
+        "imdb_last_error": imdb_last_error,
+        "workflow_status": "pending",
+        "workflow_last_error": None,
+    }
+    if imdb_changed:
+        fields.update(
+            _imdb_downstream_reset_fields(
+                preserve_manual_title_es=_has_manual_imdb_title_es_from_dict(current_movie)
+            )
+        )
+
+    _update_workflow_fields(movie_id, fields)
 
 
 def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
@@ -2141,53 +2186,30 @@ def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
     canonical_url = canonical_urls[0] if len(canonical_urls) == 1 else join_values(canonical_urls)
     imdb_ids = [extract_imdb_id(url) for url in canonical_urls]
     imdb_id = imdb_ids[0] if len(imdb_ids) == 1 else join_values(imdb_ids)
-
-    _update_workflow_fields(
-        movie_id,
-        {
-            "imdb_url": canonical_url,
-            "imdb_id": imdb_id,
-            "imdb_status": "found",
-            "imdb_last_error": None,
-            "imdb_title_es": None,
-            "imdb_title_es_status": "pending",
-            "imdb_title_es_last_error": None,
-            "imdb_title_original": None,
-            "imdb_title_original_status": "pending",
-            "imdb_title_original_last_error": None,
-            "omdb_raw_json": None,
-            "omdb_status": "pending",
-            "omdb_last_error": None,
-            "omdb_title": None,
-            "omdb_year": None,
-            "omdb_rated": None,
-            "omdb_released": None,
-            "omdb_runtime": None,
-            "omdb_genre": None,
-            "omdb_director": None,
-            "omdb_writer": None,
-            "omdb_actors": None,
-            "omdb_plot_en": None,
-            "omdb_plot_es": None,
-            "omdb_language": None,
-            "omdb_country": None,
-            "omdb_awards": None,
-            "omdb_poster": None,
-            "omdb_imdbrating": None,
-            "omdb_imdbvotes": None,
-            "omdb_type": None,
-            "omdb_dvd": None,
-            "omdb_boxoffice": None,
-            "omdb_production": None,
-            "translation_status": "pending",
-            "translation_last_error": None,
-            "workflow_status": "pending",
-            "workflow_needs_review": False,
-            "workflow_review_reason": None,
-            "workflow_last_error": None,
-        },
+    current_movie = get_movie(movie_id) or {}
+    imdb_changed = (
+        canonical_url != str(current_movie.get("imdb_url") or "").strip()
+        or imdb_id != str(current_movie.get("imdb_id") or "").strip()
     )
 
+    fields: dict[str, Any] = {
+        "imdb_url": canonical_url,
+        "imdb_id": imdb_id,
+        "imdb_status": "found",
+        "imdb_last_error": None,
+        "workflow_status": "pending",
+        "workflow_needs_review": False,
+        "workflow_review_reason": None,
+        "workflow_last_error": None,
+    }
+    if imdb_changed:
+        fields.update(
+            _imdb_downstream_reset_fields(
+                preserve_manual_title_es=_has_manual_imdb_title_es_from_dict(current_movie)
+            )
+        )
+
+    _update_workflow_fields(movie_id, fields)
 
 
 def update_imdb_title_es(
@@ -2196,16 +2218,26 @@ def update_imdb_title_es(
     title_es: str | None,
     status: str,
     error: str | None = None,
+    preserve_manual: bool = True,
 ) -> None:
+    current_movie = get_movie(movie_id) or {}
+    if (
+        preserve_manual
+        and status != "manual"
+        and _has_manual_imdb_title_es_from_dict(current_movie)
+    ):
+        _update_workflow_fields(
+            movie_id,
+            {"workflow_status": "pending", "workflow_last_error": None},
+        )
+        return
+
     _update_workflow_fields(
         movie_id,
         {
             "imdb_title_es": title_es,
             "imdb_title_es_status": status,
             "imdb_title_es_last_error": error,
-            "imdb_title_original": None,
-            "imdb_title_original_status": "pending",
-            "imdb_title_original_last_error": None,
             "workflow_status": "pending",
             "workflow_last_error": None,
         },
@@ -2215,9 +2247,21 @@ def update_imdb_title_es(
 def set_manual_imdb_title_es(movie_id: str, title_es: str | None) -> None:
     clean = str(title_es or "").strip()
     if clean:
-        update_imdb_title_es(movie_id, title_es=clean, status="manual", error=None)
+        update_imdb_title_es(
+            movie_id,
+            title_es=clean,
+            status="manual",
+            error=None,
+            preserve_manual=False,
+        )
     else:
-        update_imdb_title_es(movie_id, title_es=None, status="pending", error=None)
+        update_imdb_title_es(
+            movie_id,
+            title_es=None,
+            status="pending",
+            error=None,
+            preserve_manual=False,
+        )
 
 
 def update_omdb(movie_id: str, omdb_payload: dict[str, Any], status: str, error: str | None) -> None:
@@ -2382,7 +2426,11 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
 
 def movies_for_imdb_title_es(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con = get_connection()
-    where = "WHERE imdb_url IS NOT NULL AND imdb_url <> ''"
+    where = (
+        "WHERE imdb_url IS NOT NULL "
+        "AND imdb_url <> '' "
+        "AND COALESCE(imdb_title_es_status, '') <> 'manual'"
+    )
     if not overwrite:
         where += f"""
         AND (
@@ -2505,6 +2553,7 @@ def movie_ids_for_workflow(
         where = f"""
         WHERE imdb_url IS NOT NULL
           AND imdb_url <> ''
+          AND COALESCE(imdb_title_es_status, '') <> 'manual'
           AND (
                 (imdb_title_es IS NULL OR TRIM(imdb_title_es) = '')
              OR (

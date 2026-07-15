@@ -269,6 +269,81 @@ def test_startup_normalizes_existing_database_image_paths(tmp_path, monkeypatch)
     assert response.json()["image_path"] == "input/P0001.jpg"
 
 
+
+def test_manual_titles_are_preserved_and_resolve_title_es_stage(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            """)
+        con.execute("""
+            INSERT INTO movie_extraction (id, extraction_title, manual_title)
+            VALUES ('P0001', 'Título extraído', 'Título manual fase 2')
+            """)
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    manual_response = client.put(
+        "/movies/P0001/imdb-title-es",
+        json={"title_es": "Título español manual"},
+    )
+    assert manual_response.status_code == 200
+
+    from src.backend.services import imdb_title_es as imdb_title_service
+    from src.backend.services import movies as movies_service
+
+    movies_service.update_imdb_title_es(
+        "P0001",
+        title_es="Título automático",
+        status="fetched",
+        error=None,
+    )
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_title_es"] == "Título español manual"
+    assert movie["imdb_title_es_status"] == "manual"
+
+    imdb_response = client.put(
+        "/movies/P0001/imdb",
+        json={"imdb_url": "https://www.imdb.com/title/tt0000001/"},
+    )
+    assert imdb_response.status_code == 200
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_title_es"] == "Título español manual"
+    assert movie["imdb_title_es_status"] == "manual"
+    assert client.get("/stats").json()["needs_title_es"] == 0
+    assert movies_service.movies_for_imdb_title_es(limit=10, overwrite=True) == []
+
+    monkeypatch.setattr(
+        imdb_title_service,
+        "fetch_title_es",
+        lambda imdb_url: "Título automático",
+    )
+    workflow_response = client.post(
+        "/workflow/run",
+        json={
+            "movie_id": "P0001",
+            "limit": 1,
+            "start_stage": "title_es",
+            "stop_after": "title_es",
+            "overwrite": True,
+        },
+    )
+    assert workflow_response.status_code == 200
+    workflow_item = workflow_response.json()["items"][0]
+    assert workflow_item["failed_step"] is None
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_title_es"] == "Título español manual"
+    assert movie["imdb_title_es_status"] == "manual"
+
+    movies_service.reset_from_stage("P0001", "extraction")
+    movie = client.get("/movies/P0001").json()
+    assert movie["manual_title"] == "Título manual fase 2"
+    assert movie["imdb_title_es"] == "Título español manual"
+    assert movie["imdb_title_es_status"] == "manual"
+
 def test_prepare_items_is_idempotent_and_preserves_manual_edits(tmp_path, monkeypatch):
     (tmp_path / "secciones.csv").write_text(
         "id sección,título\n434,Cine - Películas - DVD\n",
