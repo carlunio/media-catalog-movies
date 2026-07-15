@@ -11,3 +11,9 @@ class RunOmdbRequest(BaseModel):
 
 class UpdateOmdbRequest(BaseModel):
     fields: dict[str, Any]
+
+class DownloadOmdbCoversRequest(BaseModel):
+    ids: list[str] | None = None
+    movie_id: str | None = None
+    poster_slot: int | None = Field(default=None, ge=1)
+

@@ -25,16 +25,16 @@ STAGE_BUCKETS = (
 )
 
 WORKFLOW_GRAPH_NODES = [
-    {"id": "load_movie", "label": "Load movie", "kind": "control"},
-    {"id": "apply_action", "label": "Apply action", "kind": "control"},
-    {"id": "extract", "label": "Extraction", "kind": "stage", "stage": "extraction"},
-    {"id": "imdb", "label": "IMDb search", "kind": "stage", "stage": "imdb"},
-    {"id": "title_es", "label": "IMDb title (ES)", "kind": "stage", "stage": "title_es"},
-    {"id": "omdb", "label": "OMDb fetch", "kind": "stage", "stage": "omdb"},
-    {"id": "translation", "label": "Plot translation", "kind": "stage", "stage": "translation"},
-    {"id": "evaluate", "label": "Evaluate", "kind": "control"},
-    {"id": "retry", "label": "Retry", "kind": "control"},
-    {"id": "end", "label": "End", "kind": "terminal"},
+    {"id": "load_movie", "label": "Cargar película", "kind": "control"},
+    {"id": "apply_action", "label": "Aplicar acción", "kind": "control"},
+    {"id": "extract", "label": "Extracción", "kind": "stage", "stage": "extraction"},
+    {"id": "imdb", "label": "Búsqueda IMDb", "kind": "stage", "stage": "imdb"},
+    {"id": "title_es", "label": "Título IMDb (ES)", "kind": "stage", "stage": "title_es"},
+    {"id": "omdb", "label": "Descarga OMDb", "kind": "stage", "stage": "omdb"},
+    {"id": "translation", "label": "Traducción de sinopsis", "kind": "stage", "stage": "translation"},
+    {"id": "evaluate", "label": "Evaluación", "kind": "control"},
+    {"id": "retry", "label": "Reintento", "kind": "control"},
+    {"id": "end", "label": "Fin", "kind": "terminal"},
 ]
 
 WORKFLOW_GRAPH_EDGES = [
@@ -68,8 +68,8 @@ def _invoke_graph(initial_state: dict[str, Any]) -> dict[str, Any]:
         from ..workflow import run_workflow_graph
     except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "langgraph is not installed in the current environment. "
-            "Install project dependencies and restart the backend."
+            "LangGraph no está instalado en este entorno. "
+            "Instala las dependencias del proyecto y reinicia el backend."
         ) from exc
 
     return run_workflow_graph(initial_state)
@@ -165,7 +165,7 @@ def run_one(
     stop = _normalize_stage(stop_after, default=stage) if stop_after else None
 
     if movies.get_movie(movie_id) is None:
-        return {"id": movie_id, "status": "error", "error": "Movie not found"}
+        return {"id": movie_id, "status": "error", "error": "Película no encontrada"}
 
     result_state = _invoke_graph(
         {
@@ -186,7 +186,7 @@ def run_one(
     movie = movies.get_movie(movie_id)
 
     if movie is None:
-        return {"id": movie_id, "status": "error", "error": "Movie disappeared after workflow run"}
+        return {"id": movie_id, "status": "error", "error": "La película desapareció tras ejecutar el workflow"}
 
     failed_step = result_state.get("failed_step")
     error = result_state.get("error")
@@ -202,6 +202,8 @@ def run_one(
         status = "approved"
     elif result_state.get("outcome") == "partial":
         status = "partial"
+    elif result_state.get("outcome") == "blocked_missing_image":
+        status = "blocked"
 
     return {
         "id": movie_id,
@@ -296,7 +298,7 @@ def review_action(
     normalized = action.strip().lower()
     stage = action_to_stage.get(normalized)
     if stage is None:
-        raise ValueError(f"Invalid review action: {action}")
+        raise ValueError(f"Acción de revisión no válida: {action}")
 
     return run_one(
         movie_id,
@@ -315,11 +317,11 @@ def review_action(
 def mark_review(movie_id: str, *, reason: str | None = None, node: str = "manual") -> dict[str, Any]:
     movie = movies.get_movie(movie_id)
     if movie is None:
-        raise ValueError("Movie not found")
+        raise ValueError("Película no encontrada")
 
     text = (reason or "").strip()
     if not text:
-        text = "Marked for manual review from Streamlit orchestration page"
+        text = "Marcado para revisión manual desde la página de orquestación de Streamlit"
 
     movies.set_workflow_review(movie_id, node=node.strip() or "manual", reason=text, error=None)
     updated = movies.get_movie(movie_id)

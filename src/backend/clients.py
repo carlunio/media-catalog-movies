@@ -66,7 +66,7 @@ def list_ollama_models() -> list[str]:
         except Exception as exc:  # pragma: no cover
             errors.append(str(exc))
     else:
-        errors.append("ollama package is not available")
+        errors.append("El paquete ollama no está disponible")
 
     try:
         completed = subprocess.run(
@@ -103,7 +103,7 @@ def ollama_chat(
 ) -> str:
     if ollama is None:
         raise ClientError(
-            "ollama package is not available. Install dependencies in the project virtualenv."
+            "El paquete ollama no está disponible. Instala las dependencias en el entorno virtual del proyecto."
         )
 
     try:

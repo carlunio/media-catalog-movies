@@ -1,10 +1,23 @@
+import html
 import os
+import time
 from typing import Any
 
 import requests
 import streamlit as st
 
+try:
+    from src.project_meta import get_app_meta
+except ModuleNotFoundError:  # pragma: no cover
+    from project_meta import get_app_meta
+
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+APP_META = get_app_meta()
+PAGE_ICON = """
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640">
+<path d="M64 128C64 92.7 92.7 64 128 64H512C547.3 64 576 92.7 576 128V384C576 419.3 547.3 448 512 448H397.3L350.6 541.4C345.2 552.3 334 559.1 321.9 559.1C309.8 559.1 298.6 552.3 293.2 541.4L246.7 448H128C92.7 448 64 419.3 64 384V128zM192 176C174.3 176 160 190.3 160 208V304C160 321.7 174.3 336 192 336H448C465.7 336 480 321.7 480 304V208C480 190.3 465.7 176 448 176H192z"/>
+</svg>
+"""
 WORKFLOW_STAGES = ("extraction", "imdb", "title_es", "omdb", "translation")
 STAGE_ALIASES = {
     "extract_title_team": "extraction",
@@ -12,6 +25,24 @@ STAGE_ALIASES = {
     "fetch_imdb_title_es": "title_es",
     "fetch_omdb": "omdb",
     "translate_plot": "translation",
+}
+STAGE_UI_LABELS = {
+    "extraction": "Extracción",
+    "imdb": "IMDb",
+    "title_es": "IMDb título ES",
+    "omdb": "OMDb",
+    "translation": "Traducción",
+    "review": "Revisión",
+    "done": "Done",
+    "running": "Running",
+    "unknown": "Unknown",
+}
+NODE_UI_LABELS = {
+    "extract_title_team": "extract_title_team",
+    "search_imdb": "search_imdb",
+    "fetch_imdb_title_es": "fetch_imdb_titles",
+    "fetch_omdb": "fetch_omdb",
+    "translate_plot": "translate_plot",
 }
 GLOBAL_SELECTED_MOVIE_KEY = "global_selected_movie_id"
 GLOBAL_SELECTED_MOVIE_SEQ_KEY = "global_selected_movie_seq"
@@ -40,6 +71,7 @@ THEME_APPLIED_KEY = "_ui_theme_applied"
 
 THEME_CSS = """
 <style>
+@import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css');
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,700&display=swap');
 
@@ -67,8 +99,47 @@ html, body, [class*="css"] {
     linear-gradient(180deg, #f5fafb 0%, var(--app-bg) 100%);
 }
 
+section.main > div.block-container {
+  max-width: 1360px;
+  padding-top: 0.9rem;
+  padding-bottom: 1.1rem;
+}
+
 [data-testid="stHeader"] {
   background: transparent;
+}
+
+
+.mc-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+  color: var(--text-main);
+  letter-spacing: 0;
+  font-family: "Fraunces", "Space Grotesk", serif;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.mc-heading i {
+  color: var(--accent);
+  min-width: 1.05em;
+  text-align: center;
+}
+
+.mc-heading-1 {
+  font-size: 2.25rem;
+  margin: 0 0 0.3rem 0;
+}
+
+.mc-heading-2 {
+  font-size: 1.28rem;
+  margin: 0.35rem 0 0.25rem 0;
+}
+
+.mc-heading-3 {
+  font-size: 1.08rem;
+  margin: 0.25rem 0 0.2rem 0;
 }
 
 [data-testid="stSidebar"] > div:first-child {
@@ -104,6 +175,8 @@ h1 {
   background: linear-gradient(180deg, #12758c, var(--brand));
   color: #f5fcff;
   font-weight: 600;
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
   box-shadow: 0 10px 18px -14px rgba(0, 95, 115, 0.95);
 }
 
@@ -140,6 +213,17 @@ div[data-baseweb="textarea"] > div:focus-within {
   overflow: hidden;
 }
 
+[data-testid="stVerticalBlock"] {
+  gap: 0.45rem;
+}
+
+div[data-testid="stForm"] {
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 0.4rem 0.55rem;
+}
+
 [data-testid="stAlert"] {
   border-radius: 12px;
   border: 1px solid rgba(0, 95, 115, 0.14);
@@ -152,9 +236,6 @@ code {
   padding: 0.08rem 0.35rem;
 }
 
-.st-emotion-cache-13ln4jf {
-  max-width: 1220px;
-}
 </style>
 """
 
@@ -171,11 +252,36 @@ def _apply_theme() -> None:
 
 def configure_page() -> None:
     try:
-        st.set_page_config(page_title="Media Catalog Movies", layout="wide")
+        st.set_page_config(
+            page_title=APP_META.app_name, page_icon=PAGE_ICON, layout="wide"
+        )
     except Exception:
         # Ignore repeated calls when Streamlit has already configured the page.
         pass
     _apply_theme()
+    st.sidebar.caption(f"Versión: {APP_META.display_version}")
+    if APP_META.changelog_path.exists():
+        st.sidebar.caption(f"Changelog: {APP_META.changelog_path.name}")
+
+
+def render_icon_heading(
+    text: str,
+    *,
+    icon: str,
+    level: int = 1,
+) -> None:
+    safe_text = html.escape(text)
+    safe_icon = html.escape(icon)
+    level = max(1, min(level, 6))
+    st.markdown(
+        (
+            f'<h{level} class="mc-heading mc-heading-{level}">'
+            f'<i class="fa-solid fa-{safe_icon}"></i>'
+            f"<span>{safe_text}</span>"
+            f"</h{level}>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _url(path: str) -> str:
@@ -263,7 +369,7 @@ def render_timeout_controls() -> None:
             st.caption("Timeout desactivado: requests espera indefinidamente.")
 
     with st.sidebar.expander("Debug UI state", expanded=False):
-        if st.button("Resetear estado de UI", width="stretch"):
+        if st.button("Restablecer estado de UI", width="stretch"):
             try:
                 st.session_state.clear()
             except Exception:
@@ -329,8 +435,38 @@ def normalize_workflow_stage(value: str | None) -> str | None:
     return None
 
 
+def stage_ui_label(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return STAGE_UI_LABELS["unknown"]
+
+    normalized = normalize_workflow_stage(raw)
+    if raw.lower().startswith("running:"):
+        suffix = raw.split(":", 1)[1].strip()
+        node_label = node_ui_label(suffix)
+        return (
+            f"{STAGE_UI_LABELS['running']}:{node_label}"
+            if node_label
+            else STAGE_UI_LABELS["running"]
+        )
+
+    if normalized:
+        return STAGE_UI_LABELS.get(normalized, normalized)
+    return STAGE_UI_LABELS.get(raw.lower(), raw)
+
+
+def node_ui_label(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    return NODE_UI_LABELS.get(raw, raw)
+
+
 def infer_review_stage(movie: dict[str, Any]) -> str | None:
-    for raw in (movie.get("workflow_current_node"), movie.get("workflow_review_reason")):
+    for raw in (
+        movie.get("workflow_current_node"),
+        movie.get("workflow_review_reason"),
+    ):
         stage = normalize_workflow_stage(str(raw) if raw is not None else None)
         if stage:
             return stage
@@ -339,9 +475,13 @@ def infer_review_stage(movie: dict[str, Any]) -> str | None:
 
 def build_review_rerun_options(review_stage: str) -> list[tuple[str, str]]:
     idx = WORKFLOW_STAGES.index(review_stage)
-    options: list[tuple[str, str]] = [(f"Reejecutar fase {review_stage}", review_stage)]
+    target_label = stage_ui_label(review_stage)
+    options: list[tuple[str, str]] = [(f"Reejecutar fase {target_label}", review_stage)]
     for start_stage in reversed(WORKFLOW_STAGES[:idx]):
-        options.append((f"Ejecutar desde {start_stage} hasta {review_stage}", start_stage))
+        start_label = stage_ui_label(start_stage)
+        options.append(
+            (f"Ejecutar desde {start_label} hasta {target_label}", start_stage)
+        )
     return options
 
 
@@ -350,10 +490,10 @@ def movie_selector_label(movie: dict[str, Any]) -> str:
     title = (
         str(movie.get("manual_title") or "").strip()
         or str(movie.get("extraction_title") or "").strip()
-        or "(sin titulo)"
+        or "(sin título)"
     )
-    stage = str(movie.get("pipeline_stage") or "unknown")
-    review = " | review" if bool(movie.get("workflow_needs_review")) else ""
+    stage = stage_ui_label(str(movie.get("pipeline_stage") or "unknown"))
+    review = " | revisión" if bool(movie.get("workflow_needs_review")) else ""
     return f"{movie_id} | {title} | {stage}{review}"
 
 
@@ -377,10 +517,7 @@ def select_movie_id(
         if str(row.get("id") or "").strip()
     }
 
-    preferred = get_selected_movie_id()
-    if preferred not in movie_ids:
-        preferred = movie_ids[0]
-
+    preferred_global = get_selected_movie_id()
     current_widget_value = _get_session_value(key, None)
     seen_seq_key = f"{key}__seen_global_seq"
     seen_seq_raw = _get_session_value(seen_seq_key, -1)
@@ -390,10 +527,20 @@ def select_movie_id(
         seen_seq = -1
 
     global_seq = _get_selected_movie_seq()
-    should_apply_global = seen_seq != global_seq or current_widget_value not in movie_ids
-    if should_apply_global:
-        _set_session_value(key, preferred)
+    global_changed = seen_seq != global_seq
+    if global_changed:
+        if preferred_global in movie_ids:
+            _set_session_value(key, preferred_global)
+        elif current_widget_value in movie_ids:
+            _set_session_value(key, current_widget_value)
+        else:
+            _set_session_value(key, movie_ids[0])
         _set_session_value(seen_seq_key, global_seq)
+    elif current_widget_value not in movie_ids:
+        if preferred_global in movie_ids:
+            _set_session_value(key, preferred_global)
+        else:
+            _set_session_value(key, movie_ids[0])
 
     selected = st.selectbox(
         label,
@@ -406,11 +553,57 @@ def select_movie_id(
     return selected
 
 
+def render_movie_prev_next(
+    rows: list[dict[str, Any]],
+    selected_id: str,
+    *,
+    key_prefix: str,
+    noun: str = "Película",
+) -> None:
+    movie_ids = [
+        str(row.get("id") or "").strip()
+        for row in rows
+        if str(row.get("id") or "").strip()
+    ]
+    if selected_id not in movie_ids:
+        return
+
+    current_index = movie_ids.index(selected_id)
+    nav_left, nav_center, nav_right = st.columns([1, 2, 1], gap="small")
+    with nav_left:
+        if st.button(
+            "Anterior",
+            disabled=current_index == 0,
+            key=f"{key_prefix}_prev",
+            width="stretch",
+        ):
+            set_selected_movie_id(movie_ids[current_index - 1])
+            st.rerun()
+    with nav_center:
+        st.caption(f"{noun} {current_index + 1} de {len(movie_ids)} en este filtro.")
+    with nav_right:
+        if st.button(
+            "Siguiente",
+            disabled=current_index >= len(movie_ids) - 1,
+            key=f"{key_prefix}_next",
+            width="stretch",
+        ):
+            set_selected_movie_id(movie_ids[current_index + 1])
+            st.rerun()
+
+
 def api_get(path: str, *, timeout: float | None = None, **kwargs) -> Any:
     resolved_timeout = _effective_timeout(timeout)
     response = requests.get(_url(path), timeout=resolved_timeout, **kwargs)
     response.raise_for_status()
     return response.json()
+
+
+def api_get_bytes(path: str, *, timeout: float | None = None, **kwargs) -> bytes:
+    resolved_timeout = _effective_timeout(timeout)
+    response = requests.get(_url(path), timeout=resolved_timeout, **kwargs)
+    response.raise_for_status()
+    return response.content
 
 
 def api_post(path: str, *, timeout: float | None = None, **kwargs) -> Any:
@@ -428,11 +621,19 @@ def api_put(path: str, *, timeout: float | None = None, **kwargs) -> Any:
 
 
 def show_backend_status() -> None:
-    try:
-        api_get("/health")
-        st.success(f"Backend reachable: {API_URL}")
-    except Exception as exc:
-        st.error(f"Backend not reachable: {API_URL} ({exc})")
+    last_exc: Exception | None = None
+    max_attempts = 20
+    for attempt in range(max_attempts):
+        try:
+            api_get("/health", timeout=3.0)
+            st.success(f"Backend disponible: {API_URL}")
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt < (max_attempts - 1):
+                time.sleep(0.5)
+
+    st.error(f"Backend no disponible: {API_URL} ({last_exc})")
 
 
 def load_stats() -> dict[str, int]:
@@ -451,6 +652,12 @@ def load_stats() -> dict[str, int]:
         }
 
 
+@st.cache_data(ttl=60)
+def load_cover_name_audit() -> dict[str, Any]:
+    payload = api_get("/covers/name-audit")
+    return payload if isinstance(payload, dict) else {}
+
+
 @st.cache_data(ttl=30)
 def load_ollama_models() -> list[str]:
     payload = api_get("/models/ollama")
@@ -458,7 +665,12 @@ def load_ollama_models() -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
-def select_ollama_model(label: str, default_model: str, *, key: str) -> str:
+def select_ollama_model(
+    label: str,
+    default_model: str,
+    *,
+    key: str,
+) -> str:
     resolved_default = (default_model or "").strip()
 
     try:

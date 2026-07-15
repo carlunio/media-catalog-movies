@@ -9,7 +9,7 @@ from ..config import (
     VISION_TITLE_MODEL,
     WORKFLOW_MAX_ATTEMPTS,
 )
-from ..multi_value import PLOT_MULTI_SEPARATOR, split_values
+from ..multi_value import split_values
 from ..services import cover_extraction, imdb_links, imdb_title_es, movies, omdb_data, plot_translation
 
 StageName = Literal["extraction", "imdb", "title_es", "omdb", "translation"]
@@ -86,7 +86,7 @@ def _load_movie_node(state: WorkflowState) -> WorkflowState:
     if movie is None:
         return {
             "failed_step": "load_movie",
-            "error": f"Movie not found: {movie_id}",
+            "error": f"Película no encontrada: {movie_id}",
             "stop_pipeline": True,
             "route": "end",
         }
@@ -129,7 +129,7 @@ def _apply_action_node(state: WorkflowState) -> WorkflowState:
 
     retry_stage = retry_action_to_stage.get(action)
     if retry_stage is None:
-        return _with_failure(movie_id, step="apply_action", error=f"Unsupported action: {action}")
+        return _with_failure(movie_id, step="apply_action", error=f"Acción no soportada: {action}")
 
     attempt = movies.increment_workflow_attempt(movie_id)
     movies.reset_from_stage(movie_id, retry_stage)
@@ -161,13 +161,31 @@ def _extract_node(state: WorkflowState) -> WorkflowState:
 
     movie = movies.get_movie(movie_id)
     if movie is None:
-        return _with_failure(movie_id, step="extraction", error="Movie disappeared during extraction")
+        return _with_failure(movie_id, step="extraction", error="La película desapareció durante la extracción")
+
+    resolved_path = movies.ensure_local_image_path(movie_id)
+    if not resolved_path:
+        missing_path = str(movie.get("image_path") or "").strip()
+        reason = (
+            "Missing local image file for extraction: "
+            f"{missing_path or '(empty image_path)'}"
+        )
+        movies.set_workflow_pending(
+            movie_id,
+            node="image_path_missing",
+            reason=reason,
+        )
+        return {
+            "movie": movie,
+            "stop_pipeline": True,
+            "outcome": "blocked_missing_image",
+        }
 
     should_run = bool(state.get("overwrite")) or not movie.get("extraction_title") or not movie.get("extraction_team")
     if should_run:
         try:
             payload = cover_extraction.extract_from_cover(
-                movie["image_path"],
+                resolved_path,
                 title_model=state.get("title_model", VISION_TITLE_MODEL),
                 team_model=state.get("team_model", VISION_TEAM_MODEL),
             )
@@ -205,7 +223,7 @@ def _imdb_node(state: WorkflowState) -> WorkflowState:
 
     movie = movies.get_movie(movie_id)
     if movie is None:
-        return _with_failure(movie_id, step="imdb", error="Movie disappeared during IMDb search")
+        return _with_failure(movie_id, step="imdb", error="La película desapareció durante la búsqueda IMDb")
 
     effective_title = str(movie.get("manual_title") or movie.get("extraction_title") or "")
     title_parts = split_values(effective_title)
@@ -226,7 +244,7 @@ def _imdb_node(state: WorkflowState) -> WorkflowState:
             return _with_failure(
                 movie_id,
                 step="imdb",
-                error=str(result.get("error") or "IMDb search failed"),
+                error=str(result.get("error") or "La búsqueda IMDb falló"),
             )
 
     refreshed = movies.get_movie(movie_id)
@@ -253,11 +271,11 @@ def _title_es_node(state: WorkflowState) -> WorkflowState:
 
     movie = movies.get_movie(movie_id)
     if movie is None:
-        return _with_failure(movie_id, step="title_es", error="Movie disappeared during IMDb ES title fetch")
+        return _with_failure(movie_id, step="title_es", error="La película desapareció durante la descarga del título ES de IMDb")
 
     imdb_url = str(movie.get("imdb_url") or "").strip()
     if not imdb_url:
-        return _with_failure(movie_id, step="title_es", error="Missing imdb_url")
+        return _with_failure(movie_id, step="title_es", error="Falta imdb_url")
 
     title_es_parts = split_values(movie.get("imdb_title_es"))
     imdb_url_parts = split_values(imdb_url)
@@ -295,10 +313,10 @@ def _omdb_node(state: WorkflowState) -> WorkflowState:
 
     movie = movies.get_movie(movie_id)
     if movie is None:
-        return _with_failure(movie_id, step="omdb", error="Movie disappeared during OMDb fetch")
+        return _with_failure(movie_id, step="omdb", error="La película desapareció durante la descarga OMDb")
 
     if not movie.get("imdb_id"):
-        return _with_failure(movie_id, step="omdb", error="Missing imdb_id")
+        return _with_failure(movie_id, step="omdb", error="Falta imdb_id")
 
     imdb_id_parts = split_values(str(movie.get("imdb_id") or ""))
     omdb_title_parts = split_values(str(movie.get("omdb_title") or ""))
@@ -313,7 +331,7 @@ def _omdb_node(state: WorkflowState) -> WorkflowState:
             return _with_failure(movie_id, step="omdb", error=str(exc))
 
         if result.get("status") != "fetched":
-            return _with_failure(movie_id, step="omdb", error=str(result.get("error") or "OMDb fetch failed"))
+            return _with_failure(movie_id, step="omdb", error=str(result.get("error") or "La descarga OMDb falló"))
 
     refreshed = movies.get_movie(movie_id)
     if _should_stop_after(state, "omdb"):
@@ -339,7 +357,7 @@ def _translation_node(state: WorkflowState) -> WorkflowState:
 
     movie = movies.get_movie(movie_id)
     if movie is None:
-        return _with_failure(movie_id, step="translation", error="Movie disappeared during translation")
+        return _with_failure(movie_id, step="translation", error="La película desapareció durante la traducción")
 
     plot_en = (movie.get("omdb_plot_en") or "").strip()
     model = state.get("translation_model", TRANSLATION_MODEL)
@@ -349,12 +367,13 @@ def _translation_node(state: WorkflowState) -> WorkflowState:
             movie_id,
             plot_es=movie.get("omdb_plot_es"),
             status="skipped",
-            error="No omdb_plot_en to translate",
+            error="No hay omdb_plot_en para traducir",
         )
     else:
-        plot_en_parts = split_values(plot_en, separator=PLOT_MULTI_SEPARATOR)
-        plot_es_parts = split_values(str(movie.get("omdb_plot_es") or ""), separator=PLOT_MULTI_SEPARATOR)
-        plot_es_incomplete = len(plot_en_parts) > 1 and len(plot_es_parts) != len(plot_en_parts)
+        plot_es_incomplete = not movies.is_plot_translation_complete(
+            plot_en,
+            str(movie.get("omdb_plot_es") or ""),
+        )
 
         should_run = bool(state.get("overwrite")) or not movie.get("omdb_plot_es") or plot_es_incomplete
         if should_run:
@@ -387,6 +406,8 @@ def _evaluate_node(state: WorkflowState) -> WorkflowState:
 
     if state.get("outcome") == "approved":
         return {"route": "end"}
+    if state.get("outcome") == "blocked_missing_image":
+        return {"route": "end"}
 
     failed_step = state.get("failed_step")
     error = state.get("error")
@@ -402,7 +423,7 @@ def _evaluate_node(state: WorkflowState) -> WorkflowState:
         if failed_step != "apply_action" and attempt < max_attempts:
             return {"route": "retry"}
 
-        review_reason = f"{failed_step}: {error or 'Unknown error'}"
+        review_reason = f"{failed_step}: {error or 'Error desconocido'}"
         movies.set_workflow_review(
             movie_id,
             node=failed_step,

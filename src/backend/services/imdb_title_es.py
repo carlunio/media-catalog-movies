@@ -1,46 +1,57 @@
 import re
-from html import unescape
 from typing import Any
 
 import requests
+from bs4 import BeautifulSoup
 
 from ..config import REQUEST_TIMEOUT_SECONDS
 from ..multi_value import join_values, split_values
 from . import movies
 
-TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
 YEAR_SUFFIX_RE = re.compile(r"\s*\(\d{4}\)$")
 
 HEADERS = {
     "Accept-Language": "es-ES,es;q=0.9",
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0",
 }
 
 
-def _extract_title_from_html(html_text: str) -> str:
-    match = TITLE_TAG_RE.search(html_text or "")
-    if not match:
-        raise ValueError("No se encontro etiqueta <title> en IMDb")
+def _extract_title_es_from_html(html_text: str) -> str:
+    soup = BeautifulSoup(str(html_text or ""), "html.parser")
+    title_tag = soup.find("title")
+    if title_tag is None:
+        raise ValueError("No se pudo extraer el título en español: falta <title>")
 
-    raw_title = unescape(match.group(1)).strip()
+    raw_title = title_tag.get_text(strip=True)
     if " - " in raw_title:
         raw_title = raw_title.split(" - ", 1)[0]
-    raw_title = YEAR_SUFFIX_RE.sub("", raw_title).strip()
-    if not raw_title:
-        raise ValueError("Titulo vacio tras normalizar respuesta de IMDb")
-    return raw_title
+
+    title_es = YEAR_SUFFIX_RE.sub("", raw_title).strip()
+    if not title_es:
+        raise ValueError("Título en español vacío tras normalizar")
+    return title_es
 
 
 def fetch_title_es(imdb_url: str) -> str:
     response = requests.get(imdb_url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return _extract_title_from_html(response.text)
+    # IMDb may return 202 in anti-bot flows; still try parsing HTML title.
+    if response.status_code not in (200, 202):
+        raise Exception(f"Error al acceder a IMDb: {response.status_code}")
+
+    try:
+        return _extract_title_es_from_html(response.text)
+    except Exception as exc:
+        if response.status_code == 202:
+            raise Exception(
+                "IMDb devolvio 202 y no se pudo extraer <title> (posible bloqueo temporal)"
+            ) from exc
+        raise
 
 
 def fetch_one(movie_id: str, *, imdb_url: str | None = None) -> dict[str, Any]:
     movie = movies.get_movie(movie_id)
     if movie is None:
-        return {"id": movie_id, "status": "error", "error": "Movie not found"}
+        return {"id": movie_id, "status": "error", "error": "Película no encontrada"}
 
     target_urls = split_values(imdb_url or movie.get("imdb_url"))
     if not target_urls:

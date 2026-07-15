@@ -60,7 +60,7 @@ def _aggregate_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
 def fetch_one(movie_id: str, imdb_id: str | None = None) -> dict[str, Any]:
     movie = movies.get_movie(movie_id)
     if not movie:
-        raise ValueError(f"Movie not found: {movie_id}")
+        raise ValueError(f"Película no encontrada: {movie_id}")
 
     target_imdb_ids = split_values(imdb_id or movie.get("imdb_id"))
     if not target_imdb_ids:

@@ -1,6 +1,6 @@
 [project]
 name = "media-catalog-movies"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12"
 
 dependencies = [
@@ -9,6 +9,8 @@ dependencies = [
   "streamlit",
   "duckdb",
   "requests",
+  "beautifulsoup4",
+  "cinemagoer",
   "pillow",
   "pillow-heif",
   "ollama",
@@ -19,9 +21,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest",
+  "httpx",
   "black",
   "ruff"
 ]
+
+[tool.black]
+target-version = ["py312"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

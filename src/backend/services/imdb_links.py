@@ -385,7 +385,7 @@ def search_one(
 ) -> dict[str, Any]:
     movie = movies.get_movie(movie_id)
     if not movie:
-        return {"id": movie_id, "status": "error", "error": "Movie not found"}
+        return {"id": movie_id, "status": "error", "error": "Película no encontrada"}
 
     if not overwrite and _imdb_links_complete(movie):
         return {

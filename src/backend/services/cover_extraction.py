@@ -18,17 +18,17 @@ except Exception:  # pragma: no cover
     pass
 
 PROMPT_TITLE = (
-    "Esta es la portada de una pelicula. Puede tener estilos de letra creativos, "
+    "Esta es la portada de una película. Puede tener estilos de letra creativos, "
     "efectos visuales o maquetaciones no convencionales. "
-    "Si identificas el titulo con claridad, responde solo el titulo exacto. "
-    "Si no estas seguro, responde solo: NO IDENTIFICADO."
+    "Si identificas el título con claridad, responde solo el título exacto. "
+    "Si no estás seguro, responde solo: NO IDENTIFICADO."
 )
 
 PROMPT_TEAM = (
-    "Estas viendo la portada de una pelicula. "
+    "Estás viendo la portada de una película. "
     "Extrae nombres de personas claramente identificables como director, productor o actor/actriz. "
     "Si no puedes identificar roles con certeza, incluye los nombres al final. "
-    "Responde solo con una lista separada por comas, o cadena vacia si no hay nombres."
+    "Responde solo con una lista separada por comas, o cadena vacía si no hay nombres."
 )
 
 
@@ -106,7 +106,10 @@ def run_batch(
 
     for row in targets:
         mid = row["id"]
-        image_path = row["image_path"]
+        image_path = movies.ensure_local_image_path(mid) or row["image_path"]
+        if not image_path:
+            processed.append({"id": mid, "status": "error", "error": "Missing local image file"})
+            continue
 
         try:
             payload = extract_from_cover(

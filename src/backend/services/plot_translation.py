@@ -6,9 +6,8 @@ from ..multi_value import PLOT_MULTI_SEPARATOR, join_values, split_values
 from . import movies
 
 SYSTEM_PROMPT = (
-    "You are an English to Spanish translation tool. "
-    "Translate movie plot text to neutral Spanish. "
-    "Return only the translated text."
+    "Eres una herramienta de traducción de sinopsis de películas del inglés al español neutro. "
+    "Devuelve únicamente el texto traducido."
 )
 
 
