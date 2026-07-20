@@ -10,6 +10,7 @@ from ..config import DEFAULT_COVERS_DIR, PROJECT_ROOT
 from ..omdb_dictionaries import translate_omdb_field
 
 TABLE_NAME = "items"
+DEFAULT_TC_SECTION = "434"
 
 COLUMNS = (
     "id",
@@ -343,6 +344,76 @@ def normalize_translated_fields(con) -> int:
             updated += 1
     return updated
 
+def _movie_title_expr(alias: str = "movie") -> str:
+    return f"""
+            COALESCE(
+                CASE
+                    WHEN LOWER(COALESCE({alias}.imdb_title_es_status, '')) IN ('fetched', 'manual')
+                    THEN NULLIF(TRIM({alias}.imdb_title_es), '')
+                END,
+                NULLIF(TRIM({alias}.manual_title), ''),
+                NULLIF(TRIM({alias}.extraction_title), ''),
+                CASE
+                    WHEN LOWER(COALESCE({alias}.imdb_title_es_status, '')) IN ('manual_title', 'fallback')
+                    THEN NULLIF(TRIM({alias}.imdb_title_es), '')
+                END,
+                NULLIF(TRIM({alias}.omdb_title), ''),
+                NULLIF(TRIM({alias}.imdb_title_original), '')
+            )
+            """
+
+
+def _legacy_movie_title_expr(alias: str = "movie") -> str:
+    return f"""
+            COALESCE(
+                CASE
+                    WHEN LOWER(COALESCE({alias}.imdb_title_es_status, '')) = 'manual'
+                    THEN NULLIF(TRIM({alias}.imdb_title_es), '')
+                END,
+                NULLIF(TRIM({alias}.manual_title), ''),
+                NULLIF(TRIM({alias}.imdb_title_es), ''),
+                NULLIF(TRIM({alias}.extraction_title), ''),
+                NULLIF(TRIM({alias}.imdb_title_original), ''),
+                NULLIF(TRIM({alias}.omdb_title), '')
+            )
+            """
+
+
+def refresh_generated_titles_from_movies(con) -> int:
+    ensure_table(con)
+    desired_title = _movie_title_expr("movie")
+    legacy_title = _legacy_movie_title_expr("movie")
+    candidates_sql = f"""
+        WITH candidates AS (
+            SELECT
+                item.id,
+                NULLIF(TRIM(item.title), '') AS current_title,
+                {desired_title} AS desired_title,
+                {legacy_title} AS legacy_title
+            FROM {TABLE_NAME} AS item
+            JOIN movies AS movie ON movie.id = item.id
+        )
+        SELECT id, desired_title
+        FROM candidates
+        WHERE desired_title IS NOT NULL
+          AND COALESCE(current_title, '') <> COALESCE(desired_title, '')
+          AND (current_title = legacy_title OR current_title IS NULL)
+        """
+    rows = con.execute(candidates_sql).fetchall()
+    if not rows:
+        return 0
+
+    con.execute(
+        f"""
+        WITH updates AS ({candidates_sql})
+        UPDATE {TABLE_NAME} AS item
+        SET title = updates.desired_title,
+            updated_at = CURRENT_TIMESTAMP
+        FROM updates
+        WHERE item.id = updates.id
+        """
+    )
+    return len(rows)
 
 def insert_missing_from_movies(con) -> int:
     ensure_table(con)
@@ -352,17 +423,11 @@ def insert_missing_from_movies(con) -> int:
             id, title, original_title, item_type, director, writers, actors, year,
             rated, released, runtime, genres, country, languages, plot,
             awards, production, imdb_url, imdb_rating, imdb_votes, box_office,
-            listing_status, stock_status, image_path, updated_at
+            listing_status, stock_status, tc_section, image_path, updated_at
         )
         SELECT
             movie.id,
-            COALESCE(
-                NULLIF(TRIM(movie.imdb_title_es), ''),
-                NULLIF(TRIM(movie.manual_title), ''),
-                NULLIF(TRIM(movie.extraction_title), ''),
-                NULLIF(TRIM(movie.imdb_title_original), ''),
-                NULLIF(TRIM(movie.omdb_title), '')
-            ),
+            {_movie_title_expr("movie")},
             COALESCE(
                 NULLIF(TRIM(movie.imdb_title_original), ''),
                 NULLIF(TRIM(movie.omdb_title), '')
@@ -390,6 +455,7 @@ def insert_missing_from_movies(con) -> int:
             NULLIF(TRIM(movie.omdb_boxoffice), ''),
             'ALTA',
             'En stock',
+            '{DEFAULT_TC_SECTION}',
             NULLIF(TRIM(movie.image_path), ''),
             CURRENT_TIMESTAMP
         FROM movies AS movie

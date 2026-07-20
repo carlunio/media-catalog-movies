@@ -10,6 +10,7 @@ Usa los ficheros `.bat`:
 - `launch-app.bat`
 - `stop-app.bat`
 - `update-app.bat`
+- `update-and-launch-app.bat`
 
 Buscan GNU Make en el `PATH` con alguno de estos nombres:
 
@@ -25,6 +26,7 @@ Usa los ficheros `.desktop`:
 - `launch-app.desktop`
 - `stop-app.desktop`
 - `update-app.desktop`
+- `update-and-launch-app.desktop`
 
 Abren una terminal y ejecutan el script de shell correspondiente.
 
@@ -41,3 +43,4 @@ Los scripts `.sh` también siguen disponibles para usarlos desde la terminal.
 - `make update`: ejecuta `make update-repo` y reinstala las dependencias del proyecto.
 
 Los lanzadores llamados `update-app.*` usan `make update`.
+Los lanzadores `update-and-launch-app.*` ejecutan `make update` y, si termina bien, `make dev`.

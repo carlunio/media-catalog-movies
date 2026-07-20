@@ -177,7 +177,7 @@ with plot_c1:
         value=movie.get("omdb_plot_en") or "",
         height=240,
         disabled=True,
-        key="plot_en_view",
+        key=f"plot_en_view_{selected_id}",
     )
     if st.button("Traducir solo este ID"):
         try:
@@ -204,7 +204,7 @@ with plot_c2:
         "ES",
         value=movie.get("omdb_plot_es") or "",
         height=240,
-        key="plot_es_edit",
+        key=f"plot_es_edit_{selected_id}",
     )
     if st.button("Guardar traducción manual"):
         try:

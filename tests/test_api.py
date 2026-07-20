@@ -270,6 +270,268 @@ def test_startup_normalizes_existing_database_image_paths(tmp_path, monkeypatch)
 
 
 
+
+def test_imdb_search_keeps_trying_google_after_one_query_has_no_results(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            """)
+        con.execute("""
+            INSERT INTO movie_extraction (id, extraction_title, extraction_team_json)
+            VALUES ('P0001', 'LA BALADA DEL SOLDADO', '["Valentin Kurz", "Grigori Tchoukhrai"]')
+            """)
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_links
+
+    calls: list[str] = []
+
+    def fake_google_search(term, num_results=None):
+        calls.append(term)
+        if "Valentin Kurz" in term:
+            raise RuntimeError("Google no-results page")
+        if term == "LA BALADA DEL SOLDADO site:imdb.com/title":
+            return ["https://www.imdb.com/title/tt0052600/"]
+        return []
+
+    monkeypatch.setattr(imdb_links, "google_search", fake_google_search)
+    monkeypatch.setattr(imdb_links, "CinemagoerIMDb", None)
+
+    response = client.post(
+        "/imdb/search",
+        json={"movie_id": "P0001", "limit": 1, "overwrite": True, "max_results": 5},
+    )
+
+    assert response.status_code == 200
+    assert calls[:2] == [
+        "LA BALADA DEL SOLDADO Valentin Kurz Grigori Tchoukhrai site:imdb.com/title",
+        "LA BALADA DEL SOLDADO site:imdb.com/title",
+    ]
+
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_status"] == "found"
+    assert movie["imdb_url"] == "https://www.imdb.com/title/tt0052600/"
+    assert movie["imdb_id"] == "tt0052600"
+    assert movie["imdb_query"] == "LA BALADA DEL SOLDADO site:imdb.com/title"
+
+
+def test_imdb_search_uses_cinemagoer_fallback_and_manual_url_updates_query(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute('''
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            ''')
+        con.execute('''
+            INSERT INTO movie_extraction (id, extraction_title, extraction_team_json)
+            VALUES ('P0001', 'Película imposible', '["Directora"]')
+            ''')
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_links
+
+    class EmptyFindResponse:
+        text = "<html><body>sin resultados útiles</body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeCandidate:
+        movieID = "7654321"
+
+    class FakeIMDb:
+        def search_movie(self, term, results=None):
+            return [FakeCandidate()]
+
+    monkeypatch.setattr(imdb_links, "google_search", None)
+    monkeypatch.setattr(imdb_links.requests, "get", lambda *args, **kwargs: EmptyFindResponse())
+    monkeypatch.setattr(imdb_links, "CinemagoerIMDb", lambda: FakeIMDb())
+
+    response = client.post(
+        "/imdb/search",
+        json={"movie_id": "P0001", "limit": 1, "overwrite": True, "max_results": 5},
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["status"] in {"ok", "partial"}
+    assert item["imdb_url"] == "https://www.imdb.com/title/tt7654321/"
+
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_status"] == "found"
+    assert movie["imdb_url"] == "https://www.imdb.com/title/tt7654321/"
+    assert movie["imdb_query"].startswith("cinemagoer:")
+
+    manual_response = client.put(
+        "/movies/P0001/imdb",
+        json={"imdb_url": "tt0000001"},
+    )
+    assert manual_response.status_code == 200
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_url"] == "https://www.imdb.com/title/tt0000001/"
+    assert movie["imdb_id"] == "tt0000001"
+    assert movie["imdb_query"] == "manual:https://www.imdb.com/title/tt0000001/"
+
+
+def test_imdb_title_es_uses_localized_imdb_page_and_structured_data(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute('''
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            ''')
+        con.execute('''
+            INSERT INTO movie_extraction (id, extraction_title)
+            VALUES ('P0001', 'Original title')
+            ''')
+        con.execute('''
+            INSERT INTO movie_imdb (id, imdb_url, imdb_id, imdb_status)
+            VALUES ('P0001', 'https://www.imdb.com/title/tt0000001/', 'tt0000001', 'found')
+            ''')
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_title_es
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '<html><head><script type="application/ld+json">{"name": "Título español (1999)"}</script></head></html>'
+
+    def fake_get(url, *, headers, timeout):
+        calls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setattr(imdb_title_es.requests, "get", fake_get)
+
+    response = client.post(
+        "/workflow/run",
+        json={
+            "movie_id": "P0001",
+            "limit": 1,
+            "start_stage": "title_es",
+            "stop_after": "title_es",
+            "overwrite": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls[0] == "https://www.imdb.com/es-es/title/tt0000001/"
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_title_es"] == "Título español"
+    assert movie["imdb_title_es_status"] == "fetched"
+
+def test_imdb_title_es_falls_back_to_extracted_title_when_imdb_blocks_scrape(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            """)
+        con.execute("""
+            INSERT INTO movie_extraction (id, extraction_title, extraction_team_json)
+            VALUES ('P0001', 'Título de carátula', '["Directora"]')
+            """)
+        con.execute("""
+            INSERT INTO movie_imdb (id, imdb_url, imdb_id, imdb_status)
+            VALUES ('P0001', 'https://www.imdb.com/title/tt0061328/', 'tt0061328', 'found')
+            """)
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_title_es
+
+    class FakeResponse:
+        status_code = 200
+        text = "# JavaScript is disabled\nverify that you're not a robot"
+
+    monkeypatch.setattr(imdb_title_es.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    response = client.post(
+        "/workflow/run",
+        json={
+            "movie_id": "P0001",
+            "limit": 1,
+            "start_stage": "title_es",
+            "stop_after": "title_es",
+            "overwrite": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["failed_step"] is None
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_title_es"] == "Título de carátula"
+    assert movie["imdb_title_es_status"] == "fallback"
+    assert movie["imdb_title_es_last_error"] is None
+    assert movie["pipeline_stage"] == "omdb"
+
+
+def test_imdb_title_es_uses_manual_title_without_scraping(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            """)
+        con.execute("""
+            INSERT INTO movie_extraction (id, extraction_title, manual_title, extraction_team_json)
+            VALUES ('P0001', 'Título extraído', 'Título revisado', '["Directora"]')
+            """)
+        con.execute("""
+            INSERT INTO movie_imdb (
+                id, imdb_url, imdb_id, imdb_status, imdb_title_es_status, imdb_title_es_last_error
+            )
+            VALUES (
+                'P0001', 'https://www.imdb.com/title/tt0061328/', 'tt0061328', 'found',
+                'error', 'error viejo'
+            )
+            """)
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_title_es
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("No debería llamar a IMDb si hay título manual")
+
+    monkeypatch.setattr(imdb_title_es.requests, "get", fail_if_called)
+
+    response = client.post(
+        "/workflow/run",
+        json={
+            "movie_id": "P0001",
+            "limit": 1,
+            "start_stage": "title_es",
+            "stop_after": "title_es",
+            "overwrite": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["failed_step"] is None
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_title_es"] == "Título revisado"
+    assert movie["imdb_title_es_status"] == "manual_title"
+    assert movie["imdb_title_es_last_error"] is None
+    assert movie["pipeline_stage"] == "omdb"
+
+
 def test_manual_titles_are_preserved_and_resolve_title_es_stage(tmp_path, monkeypatch):
     app = _load_app(tmp_path, monkeypatch)
     client = TestClient(app)
@@ -286,14 +548,24 @@ def test_manual_titles_are_preserved_and_resolve_title_es_stage(tmp_path, monkey
             """)
         con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
 
+    from src.backend.services import imdb_title_es as imdb_title_service
+    from src.backend.services import movies as movies_service
+
+    imdb_response = client.put(
+        "/movies/P0001/imdb",
+        json={"imdb_url": "https://www.imdb.com/title/tt0000001/"},
+    )
+    assert imdb_response.status_code == 200
+    movie = client.get("/movies/P0001").json()
+    assert movie["pipeline_stage"] == "omdb"
+    assert client.get("/stats").json()["needs_title_es"] == 0
+    assert movies_service.movies_for_imdb_title_es(limit=10, overwrite=False) == []
+
     manual_response = client.put(
         "/movies/P0001/imdb-title-es",
         json={"title_es": "Título español manual"},
     )
     assert manual_response.status_code == 200
-
-    from src.backend.services import imdb_title_es as imdb_title_service
-    from src.backend.services import movies as movies_service
 
     movies_service.update_imdb_title_es(
         "P0001",
@@ -305,11 +577,6 @@ def test_manual_titles_are_preserved_and_resolve_title_es_stage(tmp_path, monkey
     assert movie["imdb_title_es"] == "Título español manual"
     assert movie["imdb_title_es_status"] == "manual"
 
-    imdb_response = client.put(
-        "/movies/P0001/imdb",
-        json={"imdb_url": "https://www.imdb.com/title/tt0000001/"},
-    )
-    assert imdb_response.status_code == 200
     movie = client.get("/movies/P0001").json()
     assert movie["imdb_title_es"] == "Título español manual"
     assert movie["imdb_title_es_status"] == "manual"
@@ -344,6 +611,7 @@ def test_manual_titles_are_preserved_and_resolve_title_es_stage(tmp_path, monkey
     assert movie["imdb_title_es"] == "Título español manual"
     assert movie["imdb_title_es_status"] == "manual"
 
+
 def test_prepare_items_is_idempotent_and_preserves_manual_edits(tmp_path, monkeypatch):
     (tmp_path / "secciones.csv").write_text(
         "id sección,título\n434,Cine - Películas - DVD\n",
@@ -364,11 +632,11 @@ def test_prepare_items_is_idempotent_and_preserves_manual_edits(tmp_path, monkey
             """)
         con.execute("""
             INSERT INTO movie_imdb (
-                id, imdb_url, imdb_title_es, imdb_title_original
+                id, imdb_url, imdb_title_es, imdb_title_es_status, imdb_title_original
             )
             VALUES (
                 'P0001', 'https://www.imdb.com/title/tt0000001/',
-                'Título IMDb', 'Original Title'
+                'Título IMDb', 'fetched', 'Original Title'
             )
             """)
         con.execute("""
@@ -406,7 +674,7 @@ def test_prepare_items_is_idempotent_and_preserves_manual_edits(tmp_path, monkey
     assert item["plot"] == "Sinopsis en español"
     assert item["listing_status"] == "ALTA"
     assert item["stock_status"] == "En stock"
-    assert item["tc_section"] is None
+    assert item["tc_section"] == "434"
 
     updated = client.put(
         "/items/P0001",
@@ -429,7 +697,53 @@ def test_prepare_items_is_idempotent_and_preserves_manual_edits(tmp_path, monkey
     assert preserved["title"] == "Título revisado"
     assert preserved["sale_price"] == 14.5
     assert preserved["listing_status"] == "CAMBIO"
+    assert preserved["tc_section"] == "434"
     assert preserved["tc_condition"] == "4"
+
+
+def test_prepare_items_title_priority_falls_back_to_cover_then_omdb(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute('''
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES
+                ('P0001', '/tmp/P0001.jpg', 'P0001.jpg'),
+                ('P0002', '/tmp/P0002.jpg', 'P0002.jpg'),
+                ('P0003', '/tmp/P0003.jpg', 'P0003.jpg')
+            ''')
+        con.execute('''
+            INSERT INTO movie_extraction (id, extraction_title, manual_title)
+            VALUES
+                ('P0001', 'Título extraído de carátula', 'Título revisado de carátula'),
+                ('P0002', 'Título extraído de carátula 2', NULL),
+                ('P0003', NULL, NULL)
+            ''')
+        con.execute('''
+            INSERT INTO movie_imdb (id, imdb_title_es, imdb_title_es_status)
+            VALUES ('P0001', 'Fallback local en IMDb ES', 'fallback')
+            ''')
+        con.execute('''
+            INSERT INTO movie_omdb (id, omdb_title)
+            VALUES
+                ('P0001', 'Original OMDb 1'),
+                ('P0002', 'Original OMDb 2'),
+                ('P0003', 'Original OMDb 3')
+            ''')
+
+    prepared = client.post("/items/prepare")
+    assert prepared.status_code == 200
+    assert prepared.json() == {"created": 3}
+
+    items = {
+        item_id: client.get(f"/items/{item_id}").json()
+        for item_id in ("P0001", "P0002", "P0003")
+    }
+    assert items["P0001"]["title"] == "Título revisado de carátula"
+    assert items["P0002"]["title"] == "Título extraído de carátula 2"
+    assert items["P0003"]["title"] == "Original OMDb 3"
 
 
 def test_importamatic_export_flow_uses_items_and_selected_rows(tmp_path, monkeypatch):
@@ -493,10 +807,22 @@ def test_importamatic_export_flow_uses_items_and_selected_rows(tmp_path, monkeyp
     assert validation["invalid_count"] == 1
 
     invalid_export = client.post("/export/movies/csv", json={"ids": ["P0002"]})
-    assert invalid_export.status_code == 400
-    invalid_detail = invalid_export.json()["detail"]
-    assert invalid_detail["invalid_ids"] == ["P0002"]
-    assert "Falta una carátula local existente." in invalid_detail["rows"][0]["errors"]
+    assert invalid_export.status_code == 200
+    invalid_payload = invalid_export.json()
+    assert invalid_payload["rows"] == 1
+    assert invalid_payload["ids"] == ["P0002"]
+    assert invalid_payload["validation"]["invalid_ids"] == ["P0002"]
+    assert (
+        "Falta una carátula local existente."
+        in invalid_payload["validation"]["rows"][0]["errors"]
+    )
+
+    invalid_file_response = client.get(
+        "/export/movies/file",
+        params={"filename": invalid_payload["filename"]},
+    )
+    assert invalid_file_response.status_code == 200
+    assert "No seleccionada" in invalid_file_response.text
 
     empty_export = client.post("/export/movies/csv", json={"ids": []})
     assert empty_export.status_code == 200
@@ -515,6 +841,18 @@ def test_importamatic_export_flow_uses_items_and_selected_rows(tmp_path, monkeyp
     assert "<p><strong>Guion:</strong> Guionista Uno</p>" in row["DESCRIPCIÓN"]
     assert "Sinopsis &lt;especial&gt; &amp; revisada." in row["DESCRIPCIÓN"]
     assert "Primera nota.<br><br>Segunda nota." in row["DESCRIPCIÓN"]
+    hidden_description_labels = (
+        "Calificación",
+        "Estreno",
+        "Premios",
+        "Productora",
+        "Puntuación IMDb",
+        "Votos IMDb",
+        "Enlace IMDb",
+        "Taquilla",
+    )
+    for label in hidden_description_labels:
+        assert f"<strong>{label}:</strong>" not in row["DESCRIPCIÓN"]
 
     export_response = client.post("/export/movies/csv", json={"ids": ["P0001"]})
     assert export_response.status_code == 200

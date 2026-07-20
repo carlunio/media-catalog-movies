@@ -109,7 +109,7 @@ La vista DuckDB `export` reproduce la plantilla `data/plantilla_importamatic_otr
 - `POST /omdb/covers/download`: descarga los pósteres de OMDb como segunda imagen en `data/output/covers/<id>_2.jpg`.
 - `POST /export/movies/clear-operation`: vacía la operación después de una exportación confirmada.
 
-La columna `IMAGEN 2` usa la convención `<id>_2.jpg`, alineada con la descarga de pósteres de OMDb. La descripción se genera como HTML con los datos cinematográficos que no tienen columna propia en Importamatic: título original, año, tipo, dirección, guion, reparto, duración, géneros, país, idiomas, sinopsis, premios, productora e información de IMDb.
+La columna `IMAGEN 2` usa la convención `<id>_2.jpg`, alineada con la descarga de pósteres de OMDb. La descripción se genera como HTML con los datos cinematográficos que no tienen columna propia en Importamatic: título original, año, tipo, dirección, guion, reparto, duración, géneros, país, idiomas, sinopsis y notas.
 
 ## Copias, snapshots y mantenimiento
 

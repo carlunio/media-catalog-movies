@@ -31,11 +31,15 @@ SELECTION_COLUMN = "Seleccionar"
 REFERENCE_COLUMN = "REFERENCIA"
 
 
-def _sync_export_selection(preview_ids: list[str]) -> list[str]:
-    signature = tuple(preview_ids)
+def _sync_export_selection(
+    preview_ids: list[str], default_selected_ids: list[str] | None = None
+) -> list[str]:
+    signature = (tuple(preview_ids), tuple(default_selected_ids or preview_ids))
     if st.session_state.get("movies_export_preview_signature") != signature:
         st.session_state["movies_export_preview_signature"] = signature
-        st.session_state["movies_export_selected_ids"] = list(preview_ids)
+        st.session_state["movies_export_selected_ids"] = list(
+            default_selected_ids if default_selected_ids is not None else preview_ids
+        )
         st.session_state.pop("movies_export_selection_editor", None)
 
     selected_ids = [
@@ -169,7 +173,8 @@ validation_by_id = {
 invalid_validation_rows = [
     row for row in validation_rows if not bool(row.get("is_valid"))
 ]
-selected_ids = _sync_export_selection(preview_ids)
+default_selected_ids = [str(item_id) for item_id in validation.get("valid_ids") or []]
+selected_ids = _sync_export_selection(preview_ids, default_selected_ids)
 
 summary_left, summary_right = st.columns([1, 2], gap="large")
 with summary_left:
@@ -181,7 +186,8 @@ with summary_right:
     st.caption("Plantilla Importamatic de Otros, UTF-8 y separador `#`.")
     if invalid_validation_rows:
         st.warning(
-            f"{len(invalid_validation_rows)} fichas tienen errores y no se exportarán."
+            f"{len(invalid_validation_rows)} fichas tienen avisos. "
+            "Aparecen desmarcadas por defecto, pero puedes marcarlas y exportarlas igualmente."
         )
         with st.expander("Ver errores de validación"):
             st.dataframe(
@@ -219,7 +225,7 @@ if preview_rows:
         if item_id in validation_by_id and not validation_by_id[item_id].get("is_valid")
     ]
     all_selected = len(selected_ids) == len(preview_ids)
-    export_disabled = not selected_ids or bool(selected_invalid_rows)
+    export_disabled = not selected_ids
 
     with controls_container:
         toggle_col, status_col, export_col, covers_col, omdb_covers_col = st.columns(
@@ -234,7 +240,7 @@ if preview_rows:
         with status_col:
             st.caption(f"Seleccionadas: {len(selected_ids)} de {preview_count}.")
             if selected_invalid_rows:
-                st.caption(f"Con errores: {len(selected_invalid_rows)}.")
+                st.warning(f"Seleccionadas con avisos: {len(selected_invalid_rows)}.")
         with export_col:
             export_requested = st.button(
                 "Exportar CSV",

@@ -273,11 +273,10 @@ def _title_es_node(state: WorkflowState) -> WorkflowState:
     if movie is None:
         return _with_failure(movie_id, step="title_es", error="La película desapareció durante la descarga del título ES de IMDb")
 
-    has_manual_title_es = (
-        str(movie.get("imdb_title_es_status") or "").strip().lower() == "manual"
-        and bool(str(movie.get("imdb_title_es") or "").strip())
-    )
-    if has_manual_title_es:
+    if movies.resolve_imdb_title_es_from_manual_title(movie_id):
+        movie = movies.get_movie(movie_id) or movie
+
+    if movies.has_manual_imdb_title_es(movie):
         refreshed = movies.get_movie(movie_id)
         if _should_stop_after(state, "title_es"):
             return {
@@ -291,18 +290,14 @@ def _title_es_node(state: WorkflowState) -> WorkflowState:
     if not imdb_url:
         return _with_failure(movie_id, step="title_es", error="Falta imdb_url")
 
-    title_es_parts = split_values(movie.get("imdb_title_es"))
-    imdb_url_parts = split_values(imdb_url)
-    title_es_incomplete = len(imdb_url_parts) > 1 and len(title_es_parts) != len(imdb_url_parts)
-
-    should_run = (
-        bool(state.get("overwrite"))
-        or not str(movie.get("imdb_title_es") or "").strip()
-        or title_es_incomplete
-    )
+    should_run = bool(state.get("overwrite")) or not movies.is_imdb_title_es_complete(movie)
     if should_run:
         # Non-blocking branch: if this fails, we keep the pipeline moving.
-        imdb_title_es.fetch_one(movie_id, imdb_url=imdb_url)
+        imdb_title_es.fetch_one(
+            movie_id,
+            imdb_url=imdb_url,
+            overwrite=bool(state.get("overwrite")),
+        )
 
     refreshed = movies.get_movie(movie_id)
     if _should_stop_after(state, "title_es"):

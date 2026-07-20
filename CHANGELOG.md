@@ -30,6 +30,7 @@
 - Se añaden comandos `make lint`, `make format`, `make test`, `make update-repo`, `make update` y `make ensure-env`.
 
 ### Cambiado
+- La búsqueda de ficha IMDb añade fallback con Cinemagoer y el título ES se extrae primero desde la página localizada `es-es` con parsing de datos estructurados.
 - Los títulos manuales de revisión e IMDb ES pasan a preservarse frente a reextracciones, cambios de URL IMDb y reintentos del workflow.
 - Las rutas internas de carátulas pasan a guardarse relativas al proyecto y se elimina la reconciliación manual de rutas en la UI.
 - Se corrige la prioridad del título inicial en `items`: primero título español de IMDb, después título revisado/extraído y por último título original.

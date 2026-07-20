@@ -50,6 +50,26 @@ _IMDB_ID_PARTS_SQL = "(1 + LENGTH(TRIM(imdb_id)) - LENGTH(REPLACE(TRIM(imdb_id),
 _IMDB_TITLE_ES_PARTS_SQL = (
     "(1 + LENGTH(TRIM(imdb_title_es)) - LENGTH(REPLACE(TRIM(imdb_title_es), ';', '')))"
 )
+_SPANISH_TITLE_SQL = (
+    "COALESCE("
+    "CASE WHEN LOWER(COALESCE(imdb_title_es_status, '')) = 'manual' "
+    "THEN NULLIF(TRIM(imdb_title_es), '') END, "
+    "NULLIF(TRIM(manual_title), ''), "
+    "NULLIF(TRIM(imdb_title_es), '')"
+    ")"
+)
+_SPANISH_TITLE_PARTS_SQL = (
+    f"(1 + LENGTH(TRIM({_SPANISH_TITLE_SQL})) - LENGTH(REPLACE(TRIM({_SPANISH_TITLE_SQL}), ';', '')))"
+)
+_TITLE_ES_PENDING_SQL = f"""
+(
+      {_SPANISH_TITLE_SQL} IS NULL
+   OR (
+          STRPOS(TRIM(imdb_url), ';') > 0
+      AND {_SPANISH_TITLE_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
+   )
+)
+"""
 _OMDB_TITLE_PARTS_SQL = "(1 + LENGTH(TRIM(omdb_title)) - LENGTH(REPLACE(TRIM(omdb_title), ';', '')))"
 _PLOT_EN_PARTS_SQL = (
     "(1 + ((LENGTH(TRIM(omdb_plot_en)) - LENGTH(REPLACE(TRIM(omdb_plot_en), ';\n', ''))) / 2))"
@@ -187,6 +207,65 @@ def _has_manual_imdb_title_es_from_dict(movie: dict[str, Any]) -> bool:
     )
 
 
+def _spanish_title_from_dict(movie: dict[str, Any]) -> str:
+    imdb_title_es = str(movie.get("imdb_title_es") or "").strip()
+    if _has_manual_imdb_title_es_from_dict(movie):
+        return imdb_title_es
+
+    manual_title = str(movie.get("manual_title") or "").strip()
+    if manual_title:
+        return manual_title
+
+    return imdb_title_es
+
+
+def has_manual_imdb_title_es(movie: dict[str, Any]) -> bool:
+    return _has_manual_imdb_title_es_from_dict(movie)
+
+
+def effective_spanish_title(movie: dict[str, Any]) -> str:
+    return _spanish_title_from_dict(movie)
+
+
+def is_imdb_title_es_complete(movie: dict[str, Any]) -> bool:
+    imdb_url = str(movie.get("imdb_url") or "").strip()
+    if not imdb_url:
+        return False
+    return _has_complete_multi_value(imdb_url, _spanish_title_from_dict(movie))
+
+
+def manual_title_resolves_imdb_title_es(movie: dict[str, Any], *, imdb_url: str | None = None) -> bool:
+    manual_title = str(movie.get("manual_title") or "").strip()
+    if not manual_title:
+        return False
+
+    target_url = str(imdb_url or movie.get("imdb_url") or "").strip()
+    if not target_url:
+        return False
+    return _has_complete_multi_value(target_url, manual_title)
+
+
+def resolve_imdb_title_es_from_manual_title(movie_id: str, *, imdb_url: str | None = None) -> bool:
+    movie = get_movie(movie_id) or {}
+    if _has_manual_imdb_title_es_from_dict(movie):
+        return True
+    if not manual_title_resolves_imdb_title_es(movie, imdb_url=imdb_url):
+        return False
+
+    manual_title = str(movie.get("manual_title") or "").strip()
+    _update_workflow_fields(
+        movie_id,
+        {
+            "imdb_title_es": manual_title,
+            "imdb_title_es_status": "manual_title",
+            "imdb_title_es_last_error": None,
+            "workflow_status": "pending",
+            "workflow_last_error": None,
+        },
+    )
+    return True
+
+
 def _has_complete_multi_value(base: str, candidate: str) -> bool:
     base_parts = split_values(base)
     if not base_parts:
@@ -293,8 +372,8 @@ def _derive_pipeline_stage_from_dict(movie: dict[str, Any]) -> str:
     if not _has_complete_multi_value(effective_title, imdb_url):
         return "imdb"
 
-    imdb_title_es = str(movie.get("imdb_title_es") or "").strip()
-    if not _has_complete_multi_value(imdb_url, imdb_title_es):
+    spanish_title = _spanish_title_from_dict(movie)
+    if not _has_complete_multi_value(imdb_url, spanish_title):
         return "title_es"
 
     omdb_status = str(movie.get("omdb_status") or "").lower()
@@ -1776,15 +1855,7 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
         where = f"""
         WHERE imdb_url IS NOT NULL
           AND imdb_url <> ''
-          AND COALESCE(imdb_title_es_status, '') <> 'manual'
-          AND (
-                imdb_title_es IS NULL
-             OR TRIM(imdb_title_es) = ''
-             OR (
-                    STRPOS(TRIM(imdb_url), ';') > 0
-                AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
-             )
-          )
+          AND {_TITLE_ES_PENDING_SQL}
         """
     elif stage == "needs_omdb":
         where = f"""
@@ -1833,6 +1904,8 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
     elif stage == "pipeline_done":
         pipeline_filter = "done"
 
+    limit_clause = "" if pipeline_filter is not None else "LIMIT ?"
+    params = () if pipeline_filter is not None else (limit,)
     rows = con.execute(
         f"""
         SELECT
@@ -1861,13 +1934,14 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
             workflow_review_reason,
             workflow_attempt,
             workflow_last_error,
-            updated_at
+            updated_at,
+            omdb_title
         FROM movies
         {where}
         ORDER BY LOWER(id), id
-        LIMIT ?
+        {limit_clause}
         """,
-        (limit,),
+        params,
     ).fetchall()
 
     con.close()
@@ -1912,7 +1986,9 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
                 "manual_title": row[4],
                 "manual_team_json": row[5],
                 "imdb_url": row[6],
+                "imdb_id": row[7],
                 "imdb_title_es": row[9],
+                "imdb_title_es_status": row[10],
                 "imdb_title_original": row[12],
                 "omdb_status": row[15],
                 "omdb_plot_en": row[17],
@@ -1920,11 +1996,13 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
                 "workflow_status": row[19],
                 "workflow_current_node": row[20],
                 "workflow_needs_review": bool(row[21]) if row[21] is not None else False,
+                "omdb_title": row[26],
             }
         )
 
     if pipeline_filter is not None:
         out = [row for row in out if str(row.get("pipeline_stage", "")).startswith(pipeline_filter)]
+        out = out[:limit]
 
     return out
 
@@ -1973,15 +2051,7 @@ def get_stats() -> dict[str, int]:
         SELECT COUNT(*) FROM movies
         WHERE imdb_url IS NOT NULL
           AND imdb_url <> ''
-          AND COALESCE(imdb_title_es_status, '') <> 'manual'
-          AND (
-                imdb_title_es IS NULL
-             OR TRIM(imdb_title_es) = ''
-             OR (
-                    STRPOS(TRIM(imdb_url), ';') > 0
-                AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
-             )
-          )
+          AND {_TITLE_ES_PENDING_SQL}
         """
     ).fetchone()[0]
     needs_omdb = con.execute(
@@ -2049,6 +2119,7 @@ def update_title_team(movie_id: str, title: str | None, team: list[str]) -> None
             "workflow_last_error": None,
         },
     )
+    resolve_imdb_title_es_from_manual_title(movie_id)
 
 
 
@@ -2169,6 +2240,7 @@ def update_imdb(
         )
 
     _update_workflow_fields(movie_id, fields)
+    resolve_imdb_title_es_from_manual_title(movie_id, imdb_url=canonical_url)
 
 
 def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
@@ -2193,6 +2265,7 @@ def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
     )
 
     fields: dict[str, Any] = {
+        "imdb_query": f"manual:{canonical_url}",
         "imdb_url": canonical_url,
         "imdb_id": imdb_id,
         "imdb_status": "found",
@@ -2210,6 +2283,7 @@ def set_manual_imdb(movie_id: str, imdb_url: str) -> None:
         )
 
     _update_workflow_fields(movie_id, fields)
+    resolve_imdb_title_es_from_manual_title(movie_id, imdb_url=canonical_url)
 
 
 def update_imdb_title_es(
@@ -2427,20 +2501,15 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
 def movies_for_imdb_title_es(limit: int, overwrite: bool) -> list[dict[str, Any]]:
     con = get_connection()
     where = (
-        "WHERE imdb_url IS NOT NULL "
-        "AND imdb_url <> '' "
-        "AND COALESCE(imdb_title_es_status, '') <> 'manual'"
+        "WHERE imdb_url IS NOT NULL AND imdb_url <> '' "
+        "AND NOT ("
+        "LOWER(COALESCE(imdb_title_es_status, '')) = 'manual' "
+        "AND NULLIF(TRIM(imdb_title_es), '') IS NOT NULL"
+        ")"
     )
     if not overwrite:
         where += f"""
-        AND (
-              imdb_title_es IS NULL
-           OR TRIM(imdb_title_es) = ''
-           OR (
-                  STRPOS(TRIM(imdb_url), ';') > 0
-              AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
-           )
-        )
+        AND {_TITLE_ES_PENDING_SQL}
         """
 
     rows = con.execute(
@@ -2553,13 +2622,8 @@ def movie_ids_for_workflow(
         where = f"""
         WHERE imdb_url IS NOT NULL
           AND imdb_url <> ''
-          AND COALESCE(imdb_title_es_status, '') <> 'manual'
           AND (
-                (imdb_title_es IS NULL OR TRIM(imdb_title_es) = '')
-             OR (
-                    STRPOS(TRIM(imdb_url), ';') > 0
-                AND {_IMDB_TITLE_ES_PARTS_SQL} <> {_IMDB_URL_PARTS_SQL}
-             )
+                {_TITLE_ES_PENDING_SQL}
              OR workflow_needs_review = TRUE
           )
         """

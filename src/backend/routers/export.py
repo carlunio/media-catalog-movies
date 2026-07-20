@@ -39,6 +39,7 @@ def _export_csv_response(result: dict) -> dict:
         "filename": str(result["filename"]),
         "rows": int(result["rows"]),
         "ids": result["ids"],
+        "validation": result.get("validation"),
     }
 
 

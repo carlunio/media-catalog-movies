@@ -151,15 +151,7 @@ def _tc_description_sql() -> str:
         f"{_html_paragraph_sql('Géneros', 'item.genres')}, "
         f"{_html_paragraph_sql('País', 'item.country')}, "
         f"{_html_paragraph_sql('Idiomas', 'item.languages')}, "
-        f"{_html_paragraph_sql('Calificación', 'item.rated')}, "
-        f"{_html_paragraph_sql('Estreno', 'item.released')}, "
         f"{_html_block_paragraph_sql('Sinopsis', 'item.plot')}, "
-        f"{_html_paragraph_sql('Premios', 'item.awards', preserve_line_breaks=True)}, "
-        f"{_html_paragraph_sql('Productora', 'item.production')}, "
-        f"{_html_paragraph_sql('Puntuación IMDb', 'item.imdb_rating')}, "
-        f"{_html_paragraph_sql('Votos IMDb', 'item.imdb_votes')}, "
-        f"{_html_paragraph_sql('Enlace IMDb', 'item.imdb_url')}, "
-        f"{_html_paragraph_sql('Taquilla', 'item.box_office')}, "
         f"{_html_block_paragraph_sql('Notas', 'item.notes')}"
         ")"
     )
@@ -350,6 +342,7 @@ def init_table() -> None:
 def prepare() -> int:
     with closing(get_connection()) as con:
         created = items_repo.insert_missing_from_movies(con)
+        items_repo.refresh_generated_titles_from_movies(con)
         items_repo.backfill_omdb_structured_fields(con)
         items_repo.normalize_translated_fields(con)
         items_repo.normalize_image_paths(con)

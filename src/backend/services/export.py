@@ -208,9 +208,6 @@ def export_movies_csv(
     ids: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     validation = validate_export_items(ids=ids)
-    if int(validation["invalid_count"]):
-        raise ExportValidationError(validation)
-
     preview = get_export_preview(ids=ids)
     columns = list(preview["columns"])
     rows = list(preview["rows"])
@@ -240,6 +237,7 @@ def export_movies_csv(
         "rows": len(rows),
         "columns": columns,
         "ids": list(preview["ids"]),
+        "validation": validation,
     }
 
 

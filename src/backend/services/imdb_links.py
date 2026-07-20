@@ -1,3 +1,4 @@
+import html as html_lib
 import re
 import time
 import unicodedata
@@ -5,6 +6,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import requests
+from bs4 import BeautifulSoup
 
 from ..config import IMDB_MAX_RESULTS, IMDB_SLEEP_SECONDS, REQUEST_TIMEOUT_SECONDS
 from ..multi_value import join_values, split_values
@@ -15,6 +17,11 @@ try:
     from googlesearch import search as google_search
 except Exception:  # pragma: no cover
     google_search = None
+
+try:
+    from imdb import IMDb as CinemagoerIMDb
+except Exception:  # pragma: no cover
+    CinemagoerIMDb = None
 
 IMDB_SITE_FILTER = "site:imdb.com/title"
 IMDB_FIND_URL = "https://www.imdb.com/find/"
@@ -137,8 +144,14 @@ def _find_best_imdb_url_google(
         return None, None, False
 
     saw_results = False
+    query_errors: list[str] = []
     for query in google_queries:
-        links = list(google_search(query, num_results=max_results))
+        try:
+            links = list(google_search(query, num_results=max_results))
+        except Exception as exc:
+            query_errors.append(f"{query}: {exc}")
+            continue
+
         if links:
             saw_results = True
 
@@ -147,21 +160,53 @@ def _find_best_imdb_url_google(
             if canonical:
                 return canonical, query, saw_results
 
+    if query_errors and len(query_errors) == len(google_queries) and not saw_results:
+        raise RuntimeError("Google search failed for every query: " + " | ".join(query_errors))
+
     return None, None, saw_results
+
+
+def _imdb_id_url(imdb_id: str) -> str | None:
+    text = str(imdb_id or "").strip().lower()
+    if text.startswith("tt"):
+        digits = text[2:]
+    else:
+        digits = text
+    if not digits.isdigit():
+        return None
+    return f"https://www.imdb.com/title/tt{digits.zfill(7)}/"
 
 
 def _extract_imdb_urls_from_html(html: str, max_results: int) -> list[str]:
     urls: list[str] = []
     seen_ids: set[str] = set()
 
-    for match in IMDB_ID_FROM_HTML.findall(html):
-        imdb_id = match.lower()
-        if imdb_id in seen_ids:
-            continue
-        seen_ids.add(imdb_id)
-        urls.append(f"https://www.imdb.com/title/{imdb_id}/")
-        if len(urls) >= max_results:
-            break
+    sources = [str(html or "")]
+    sources.append(html_lib.unescape(sources[0]).replace("\\/", "/"))
+
+    def _push(imdb_id: str) -> None:
+        clean_id = imdb_id.lower()
+        if clean_id in seen_ids:
+            return
+        url = _imdb_id_url(clean_id)
+        if not url:
+            return
+        seen_ids.add(clean_id)
+        urls.append(url)
+
+    for source in sources:
+        for match in IMDB_ID_FROM_HTML.findall(source):
+            _push(match)
+            if len(urls) >= max_results:
+                return urls
+
+    soup = BeautifulSoup(sources[-1], "html.parser")
+    for link in soup.find_all("a", href=True):
+        imdb_id = extract_imdb_id(str(link.get("href") or ""))
+        if imdb_id:
+            _push(imdb_id)
+            if len(urls) >= max_results:
+                return urls
 
     return urls
 
@@ -188,9 +233,33 @@ def _find_best_imdb_url_imdb_find(
     return None, None, saw_candidates
 
 
+def _find_best_imdb_url_cinemagoer(
+    search_terms: list[str],
+    max_results: int,
+) -> tuple[str | None, str | None, bool]:
+    if CinemagoerIMDb is None:
+        return None, None, False
+
+    client = CinemagoerIMDb()
+    saw_candidates = False
+    for term in search_terms:
+        results = client.search_movie(term, results=max_results)
+        if results:
+            saw_candidates = True
+
+        for candidate in results:
+            movie_id = getattr(candidate, "movieID", None)
+            url = _imdb_id_url(str(movie_id or ""))
+            if url:
+                return url, term, saw_candidates
+
+    return None, None, saw_candidates
+
+
 def _search_single_title(title: str, team: list[str], max_results: int) -> dict[str, Any]:
     search_terms = _build_search_terms(title, team)
     google_queries = _build_google_queries(search_terms)
+    query_trace = (" | ".join(google_queries) or search_terms[0]) if search_terms else ""
 
     if not search_terms:
         return {
@@ -201,8 +270,10 @@ def _search_single_title(title: str, team: list[str], max_results: int) -> dict[
 
     google_error: str | None = None
     imdb_find_error: str | None = None
+    cinemagoer_error: str | None = None
     google_saw_results = False
     imdb_find_saw_candidates = False
+    cinemagoer_saw_candidates = False
 
     try:
         best_url, used_google_query, google_saw_results = _find_best_imdb_url_google(
@@ -240,19 +311,36 @@ def _search_single_title(title: str, team: list[str], max_results: int) -> dict[
             "source": "imdb-find",
         }
 
+    try:
+        best_url, used_cinemagoer_term, cinemagoer_saw_candidates = (
+            _find_best_imdb_url_cinemagoer(search_terms, max_results=max_results)
+        )
+    except Exception as exc:
+        best_url = None
+        used_cinemagoer_term = None
+        cinemagoer_error = str(exc)
+
+    if best_url:
+        return {
+            "status": "found",
+            "query": f"cinemagoer:{used_cinemagoer_term or search_terms[0]}",
+            "imdb_url": best_url,
+            "source": "cinemagoer",
+        }
+
     first_query = google_queries[0] if google_queries else search_terms[0]
-    errors = [message for message in [google_error, imdb_find_error] if message]
-    if errors and not google_saw_results and not imdb_find_saw_candidates:
+    errors = [message for message in [google_error, imdb_find_error, cinemagoer_error] if message]
+    if errors and not google_saw_results and not imdb_find_saw_candidates and not cinemagoer_saw_candidates:
         return {
             "status": "error",
-            "query": first_query,
+            "query": query_trace or first_query,
             "error": " ; ".join(errors),
         }
 
     return {
         "status": "not_found",
-        "query": first_query,
-        "error": "No IMDb URL found after trying Google and IMDb find",
+        "query": query_trace or first_query,
+        "error": "No IMDb URL found after trying Google, IMDb find and Cinemagoer",
     }
 
 

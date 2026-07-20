@@ -69,6 +69,19 @@ def _value_parts(text: str | None) -> int:
     return len(parts)
 
 
+def _title_es_status_label(value: str | None) -> str:
+    labels = {
+        "manual": "manual",
+        "manual_title": "título revisado",
+        "fallback": "fallback local",
+        "fetched": "extraído",
+        "error": "error",
+        "pending": "pendiente",
+    }
+    raw = str(value or "").strip()
+    return labels.get(raw.lower(), raw)
+
+
 def _needs_imdb_title_fields(row: dict) -> bool:
     manual_title_es = str(row.get("imdb_title_es") or "").strip()
     if (
@@ -82,7 +95,13 @@ def _needs_imdb_title_fields(row: dict) -> bool:
         return False
 
     urls_count = _value_parts(imdb_url)
-    title_es_count = _value_parts(row.get("imdb_title_es"))
+    imdb_title_es = row.get("imdb_title_es")
+    manual_imdb_title_es = (
+        str(row.get("imdb_title_es_status") or "").strip().lower() == "manual"
+        and bool(str(imdb_title_es or "").strip())
+    )
+    spanish_title = imdb_title_es if manual_imdb_title_es else row.get("manual_title") or imdb_title_es
+    title_es_count = _value_parts(spanish_title)
 
     if title_es_count == 0:
         return True
@@ -127,6 +146,7 @@ with st.expander("Búsqueda y extracción por lote", expanded=False):
                 )
                 st.success("Búsqueda completada")
                 st.json(result)
+                st.rerun()
             except requests.exceptions.ReadTimeout:
                 st.error(
                     "Timeout esperando al backend. "
@@ -150,6 +170,7 @@ with st.expander("Búsqueda y extracción por lote", expanded=False):
                 result = api_post("/workflow/run", json=payload, timeout=LONG_TIMEOUT_SECONDS)
                 st.success("Extracción de título ES completada")
                 st.json(result)
+                st.rerun()
             except requests.exceptions.ReadTimeout:
                 st.error("Timeout extrayendo título ES IMDb.")
             except Exception as exc:
@@ -263,7 +284,7 @@ with left:
         st.write("Último error IMDb:", movie.get("imdb_last_error"))
 
     st.write("Título ES IMDb:", movie.get("imdb_title_es") or "")
-    st.write("Estado del título ES:", movie.get("imdb_title_es_status") or "")
+    st.write("Estado del título ES:", _title_es_status_label(movie.get("imdb_title_es_status")))
     if movie.get("imdb_title_es_last_error"):
         st.write("Último error título ES:", movie.get("imdb_title_es_last_error"))
 
@@ -292,6 +313,7 @@ with right:
                 )
                 st.success("Búsqueda completada")
                 st.json(result)
+                st.rerun()
             except requests.exceptions.ReadTimeout:
                 st.error("Timeout esperando al backend para este ID. Prueba Sidebar > HTTP timeout.")
             except Exception as exc:
@@ -312,6 +334,7 @@ with right:
                 )
                 st.success("Extracción de título ES completada")
                 st.json(result)
+                st.rerun()
             except requests.exceptions.ReadTimeout:
                 st.error("Timeout extrayendo título ES para este ID.")
             except Exception as exc:
@@ -320,7 +343,7 @@ with right:
     url_c1, url_c2 = st.columns([3, 1])
     with url_c1:
         manual_url = st.text_input(
-            "IMDb URL manual (usa ';' para varias películas)",
+            "IMDb URL guardada / editar manualmente (usa ';' para varias películas)",
             value=movie.get("imdb_url") or "",
             key=f"imdb_{selected_id}_manual_url",
         )
@@ -329,6 +352,7 @@ with right:
             try:
                 api_put(f"/movies/{selected_id}/imdb", json={"imdb_url": manual_url})
                 st.success("IMDb guardado")
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 
@@ -349,6 +373,7 @@ with right:
                     json={"title_es": manual_title_es},
                 )
                 st.success("Título ES guardado")
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 
@@ -376,6 +401,7 @@ else:
             result = api_post("/workflow/run", json=payload, timeout=LONG_TIMEOUT_SECONDS)
             st.success(f"Workflow relanzado desde {selected_start_stage} hasta {stage_target}.")
             st.json(result)
+            st.rerun()
         except requests.exceptions.ReadTimeout:
             st.error("Timeout relanzando workflow")
         except Exception as exc:
