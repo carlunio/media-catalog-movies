@@ -70,6 +70,15 @@ _TITLE_ES_PENDING_SQL = f"""
    )
 )
 """
+_STALE_AUTO_IMDB_SQL = """
+(
+      NULLIF(TRIM(manual_title), '') IS NOT NULL
+  AND STRPOS(TRIM(manual_title), ';') = 0
+  AND NULLIF(TRIM(imdb_url), '') IS NOT NULL
+  AND LOWER(COALESCE(imdb_query, '')) NOT LIKE 'manual:%'
+  AND STRPOS(LOWER(COALESCE(imdb_query, '')), LOWER(TRIM(manual_title))) = 0
+)
+"""
 _OMDB_TITLE_PARTS_SQL = "(1 + LENGTH(TRIM(omdb_title)) - LENGTH(REPLACE(TRIM(omdb_title), ';', '')))"
 _PLOT_EN_PARTS_SQL = (
     "(1 + ((LENGTH(TRIM(omdb_plot_en)) - LENGTH(REPLACE(TRIM(omdb_plot_en), ';\n', ''))) / 2))"
@@ -198,6 +207,10 @@ def _has_manual_override_from_dict(movie: dict[str, Any]) -> bool:
     if not manual_team:
         manual_team = parse_json_list(movie.get("manual_team"))
     return bool(manual_team)
+
+
+def _has_manual_imdb_url_from_dict(movie: dict[str, Any]) -> bool:
+    return str(movie.get("imdb_query") or "").strip().lower().startswith("manual:")
 
 
 def _has_manual_imdb_title_es_from_dict(movie: dict[str, Any]) -> bool:
@@ -1844,6 +1857,7 @@ def list_movies(stage: str | None = None, limit: int = 500) -> list[dict[str, An
         where = f"""
         WHERE imdb_url IS NULL
           OR imdb_url = ''
+          OR {_STALE_AUTO_IMDB_SQL}
           OR (
                 {_EFFECTIVE_TITLE_SQL} IS NOT NULL
             AND TRIM({_EFFECTIVE_TITLE_SQL}) <> ''
@@ -2038,6 +2052,7 @@ def get_stats() -> dict[str, int]:
         SELECT COUNT(*) FROM movies
         WHERE imdb_url IS NULL
            OR imdb_url = ''
+           OR {_STALE_AUTO_IMDB_SQL}
            OR (
                  {_EFFECTIVE_TITLE_SQL} IS NOT NULL
              AND TRIM({_EFFECTIVE_TITLE_SQL}) <> ''
@@ -2108,17 +2123,45 @@ def get_stats() -> dict[str, int]:
 
 
 def update_title_team(movie_id: str, title: str | None, team: list[str]) -> None:
-    _update_workflow_fields(
-        movie_id,
-        {
-            "manual_title": title,
-            "manual_team_json": _serialize_json(team),
-            "workflow_status": "pending",
-            "workflow_needs_review": False,
-            "workflow_review_reason": None,
-            "workflow_last_error": None,
-        },
+    current_movie = get_movie(movie_id) or {}
+    clean_title = str(title or "").strip()
+    clean_team = [str(member or "").strip() for member in team if str(member or "").strip()]
+
+    metadata_changed = (
+        clean_title != _effective_title_from_dict(current_movie)
+        or clean_team != _effective_team_from_dict(current_movie)
     )
+
+    fields: dict[str, Any] = {
+        "manual_title": clean_title or None,
+        "manual_team_json": _serialize_json(clean_team),
+        "workflow_status": "pending",
+        "workflow_needs_review": False,
+        "workflow_review_reason": None,
+        "workflow_last_error": None,
+    }
+
+    has_imdb_state = any(
+        str(current_movie.get(field_name) or "").strip()
+        for field_name in ("imdb_query", "imdb_url", "imdb_id", "imdb_status", "imdb_last_error")
+    )
+    if metadata_changed and has_imdb_state and not _has_manual_imdb_url_from_dict(current_movie):
+        fields.update(
+            {
+                "imdb_query": None,
+                "imdb_url": None,
+                "imdb_id": None,
+                "imdb_status": "pending",
+                "imdb_last_error": None,
+            }
+        )
+        fields.update(
+            _imdb_downstream_reset_fields(
+                preserve_manual_title_es=_has_manual_imdb_title_es_from_dict(current_movie)
+            )
+        )
+
+    _update_workflow_fields(movie_id, fields)
     resolve_imdb_title_es_from_manual_title(movie_id)
 
 
@@ -2473,7 +2516,10 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
             extraction_title,
             extraction_team_json,
             manual_title,
-            manual_team_json
+            manual_team_json,
+            imdb_query,
+            imdb_url,
+            imdb_status
         FROM movies
         {where}
         ORDER BY LOWER(id), id
@@ -2492,6 +2538,9 @@ def movies_for_imdb(limit: int, overwrite: bool) -> list[dict[str, Any]]:
                 "extraction_team": parse_json_list(row[2]),
                 "manual_title": row[3],
                 "manual_team": parse_json_list(row[4]),
+                "imdb_query": row[5],
+                "imdb_url": row[6],
+                "imdb_status": row[7],
             }
         )
     return output
@@ -2610,6 +2659,7 @@ def movie_ids_for_workflow(
         where = f"""
         WHERE imdb_url IS NULL
            OR imdb_url = ''
+           OR {_STALE_AUTO_IMDB_SQL}
            OR (
                  {_EFFECTIVE_TITLE_SQL} IS NOT NULL
              AND TRIM({_EFFECTIVE_TITLE_SQL}) <> ''

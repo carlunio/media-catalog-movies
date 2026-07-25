@@ -3,7 +3,7 @@ import re
 import time
 import unicodedata
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover
 
 IMDB_SITE_FILTER = "site:imdb.com/title"
 IMDB_FIND_URL = "https://www.imdb.com/find/"
+IMDB_SUGGESTION_URL = "https://v3.sg.media-imdb.com/suggestion/{first_char}/{slug}.json"
 IMDB_ID_FROM_HTML = re.compile(r"/title/(tt\d{7,8})\b", re.IGNORECASE)
 IMDB_REQUEST_HEADERS = {
     "User-Agent": (
@@ -136,6 +137,63 @@ def _build_google_queries(search_terms: list[str]) -> list[str]:
     return [f"{term} {IMDB_SITE_FILTER}".strip() for term in search_terms if term]
 
 
+def _normalize_query_text(value: str) -> str:
+    text = _normalize_for_search(str(value or "")).lower()
+    for prefix in ("imdb-suggest:", "imdb-find:", "cinemagoer:"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+
+    site_filter = _normalize_for_search(IMDB_SITE_FILTER).lower()
+    text = text.replace(site_filter, "")
+    return " ".join(text.split()).strip()
+
+
+def _query_matches_title(query: str, title: str, team: list[str]) -> bool:
+    normalized_query = _normalize_query_text(query)
+    if not normalized_query:
+        return False
+
+    search_terms = _build_search_terms(title, team)
+    candidates = [*search_terms, *_build_google_queries(search_terms)]
+    return any(_normalize_query_text(candidate) == normalized_query for candidate in candidates)
+
+
+def _stored_query_matches_current_titles(movie: dict[str, Any]) -> bool:
+    raw_query = str(movie.get("imdb_query") or "").strip()
+    if not raw_query:
+        return False
+    if raw_query.lower().startswith("manual:"):
+        return True
+
+    raw_title = movie.get("manual_title") or movie.get("extraction_title")
+    titles = _split_titles(raw_title)
+    if not titles:
+        return False
+
+    raw_team_values = [
+        str(item or "").strip()
+        for item in (movie.get("manual_team") or movie.get("extraction_team") or [])
+    ]
+    raw_team_values = [item for item in raw_team_values if item]
+    team_per_title = _team_segments_for_titles(raw_team_values, len(titles))
+    query_parts = split_values(raw_query) or [raw_query]
+
+    if len(titles) > 1:
+        if len(query_parts) != len(titles):
+            return False
+        return all(
+            _query_matches_title(
+                query_parts[index],
+                title,
+                team_per_title[index] if index < len(team_per_title) else [],
+            )
+            for index, title in enumerate(titles)
+        )
+
+    return any(_query_matches_title(query, titles[0], team_per_title[0]) for query in query_parts)
+
+
 def _find_best_imdb_url_google(
     google_queries: list[str],
     max_results: int,
@@ -164,6 +222,59 @@ def _find_best_imdb_url_google(
         raise RuntimeError("Google search failed for every query: " + " | ".join(query_errors))
 
     return None, None, saw_results
+
+
+def _suggestion_slug(term: str) -> str:
+    normalized = _normalize_for_search(term).lower()
+    return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+
+
+def _suggestion_url(term: str) -> str | None:
+    slug = _suggestion_slug(term)
+    if not slug:
+        return None
+    return IMDB_SUGGESTION_URL.format(first_char=slug[0], slug=quote(slug, safe=""))
+
+
+def _suggestion_title_allowed(item: dict[str, Any]) -> bool:
+    qid = str(item.get("qid") or "").strip().lower()
+    if not qid:
+        return True
+    return qid.startswith(("movie", "tv", "video", "short"))
+
+
+def _find_best_imdb_url_suggestions(
+    search_terms: list[str],
+    max_results: int,
+) -> tuple[str | None, str | None, bool]:
+    saw_candidates = False
+    for term in search_terms:
+        url = _suggestion_url(term)
+        if not url:
+            continue
+
+        response = requests.get(
+            url,
+            headers=IMDB_REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("d") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            continue
+
+        for item in items[:max_results]:
+            if not isinstance(item, dict):
+                continue
+            candidate_url = _imdb_id_url(str(item.get("id") or ""))
+            if not candidate_url:
+                continue
+            saw_candidates = True
+            if _suggestion_title_allowed(item):
+                return candidate_url, term, saw_candidates
+
+    return None, None, saw_candidates
 
 
 def _imdb_id_url(imdb_id: str) -> str | None:
@@ -269,9 +380,11 @@ def _search_single_title(title: str, team: list[str], max_results: int) -> dict[
         }
 
     google_error: str | None = None
+    imdb_suggestions_error: str | None = None
     imdb_find_error: str | None = None
     cinemagoer_error: str | None = None
     google_saw_results = False
+    imdb_suggestions_saw_candidates = False
     imdb_find_saw_candidates = False
     cinemagoer_saw_candidates = False
 
@@ -291,6 +404,23 @@ def _search_single_title(title: str, team: list[str], max_results: int) -> dict[
             "query": used_google_query or google_queries[0],
             "imdb_url": best_url,
             "source": "google",
+        }
+
+    try:
+        best_url, used_suggestion_term, imdb_suggestions_saw_candidates = (
+            _find_best_imdb_url_suggestions(search_terms, max_results=max_results)
+        )
+    except Exception as exc:
+        best_url = None
+        used_suggestion_term = None
+        imdb_suggestions_error = str(exc)
+
+    if best_url:
+        return {
+            "status": "found",
+            "query": f"imdb-suggest:{used_suggestion_term or search_terms[0]}",
+            "imdb_url": best_url,
+            "source": "imdb-suggest",
         }
 
     try:
@@ -329,8 +459,8 @@ def _search_single_title(title: str, team: list[str], max_results: int) -> dict[
         }
 
     first_query = google_queries[0] if google_queries else search_terms[0]
-    errors = [message for message in [google_error, imdb_find_error, cinemagoer_error] if message]
-    if errors and not google_saw_results and not imdb_find_saw_candidates and not cinemagoer_saw_candidates:
+    errors = [message for message in [google_error, imdb_suggestions_error, imdb_find_error, cinemagoer_error] if message]
+    if errors and not google_saw_results and not imdb_suggestions_saw_candidates and not imdb_find_saw_candidates and not cinemagoer_saw_candidates:
         return {
             "status": "error",
             "query": query_trace or first_query,
@@ -340,7 +470,7 @@ def _search_single_title(title: str, team: list[str], max_results: int) -> dict[
     return {
         "status": "not_found",
         "query": query_trace or first_query,
-        "error": "No IMDb URL found after trying Google, IMDb find and Cinemagoer",
+        "error": "No IMDb URL found after trying Google, IMDb suggestions, IMDb find and Cinemagoer",
     }
 
 
@@ -434,8 +564,11 @@ def run_batch(
     results: list[dict[str, Any]] = []
     if movie_id:
         targets = [movie_id]
+    elif overwrite:
+        targets = [row["id"] for row in movies.movies_for_imdb(limit=limit, overwrite=True)]
     else:
-        targets = [row["id"] for row in movies.movies_for_imdb(limit=limit, overwrite=overwrite)]
+        candidate_rows = movies.movies_for_imdb(limit=5000, overwrite=True)
+        targets = [row["id"] for row in candidate_rows if not _imdb_links_complete(row)][:limit]
 
     for mid in targets:
         result = search_one(
@@ -460,9 +593,13 @@ def _imdb_links_complete(movie: dict[str, Any]) -> bool:
     urls = split_values(movie.get("imdb_url"))
     if not urls:
         return False
-    if len(titles) <= 1:
-        return True
-    return len(urls) == len(titles)
+    if len(titles) > 1 and len(urls) != len(titles):
+        return False
+    return _stored_query_matches_current_titles(movie)
+
+
+def is_imdb_links_complete(movie: dict[str, Any]) -> bool:
+    return _imdb_links_complete(movie)
 
 
 def search_one(

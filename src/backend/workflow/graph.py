@@ -225,12 +225,7 @@ def _imdb_node(state: WorkflowState) -> WorkflowState:
     if movie is None:
         return _with_failure(movie_id, step="imdb", error="La película desapareció durante la búsqueda IMDb")
 
-    effective_title = str(movie.get("manual_title") or movie.get("extraction_title") or "")
-    title_parts = split_values(effective_title)
-    imdb_url_parts = split_values(movie.get("imdb_url"))
-    imdb_incomplete = len(title_parts) > 1 and len(imdb_url_parts) != len(title_parts)
-
-    should_run = bool(state.get("overwrite")) or not movie.get("imdb_url") or imdb_incomplete
+    should_run = bool(state.get("overwrite")) or not imdb_links.is_imdb_links_complete(movie)
 
     if should_run:
         result = imdb_links.search_one(

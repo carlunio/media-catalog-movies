@@ -320,6 +320,66 @@ def test_imdb_search_keeps_trying_google_after_one_query_has_no_results(tmp_path
     assert movie["imdb_query"] == "LA BALADA DEL SOLDADO site:imdb.com/title"
 
 
+def test_imdb_search_uses_suggestion_json_when_html_search_fails(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            """)
+        con.execute("""
+            INSERT INTO movie_extraction (id, extraction_title, extraction_team_json)
+            VALUES ('P0001', 'la ley del deseo', '[]')
+            """)
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_links
+
+    class FakeResponse:
+        def __init__(self, *, payload=None, text=""):
+            self._payload = payload
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not json")
+            return self._payload
+
+    urls: list[str] = []
+
+    def fake_get(url, *args, **kwargs):
+        urls.append(str(url))
+        if "v3.sg.media-imdb.com/suggestion" in str(url):
+            return FakeResponse(payload={"d": [{"id": "tt0093412", "l": "Law of Desire", "qid": "movie"}]})
+        return FakeResponse(text="<html><body>sin resultados útiles</body></html>")
+
+    monkeypatch.setattr(imdb_links, "google_search", None)
+    monkeypatch.setattr(imdb_links.requests, "get", fake_get)
+    monkeypatch.setattr(imdb_links, "CinemagoerIMDb", None)
+
+    response = client.post(
+        "/imdb/search",
+        json={"movie_id": "P0001", "limit": 1, "overwrite": True, "max_results": 5},
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["status"] in {"ok", "partial"}
+    assert item["imdb_url"] == "https://www.imdb.com/title/tt0093412/"
+    assert any("v3.sg.media-imdb.com/suggestion" in url for url in urls)
+
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_status"] == "found"
+    assert movie["imdb_url"] == "https://www.imdb.com/title/tt0093412/"
+    assert movie["imdb_query"] == "imdb-suggest:la ley del deseo"
+
+
 def test_imdb_search_uses_cinemagoer_fallback_and_manual_url_updates_query(tmp_path, monkeypatch):
     app = _load_app(tmp_path, monkeypatch)
     client = TestClient(app)
@@ -381,6 +441,107 @@ def test_imdb_search_uses_cinemagoer_fallback_and_manual_url_updates_query(tmp_p
     assert movie["imdb_query"] == "manual:https://www.imdb.com/title/tt0000001/"
 
 
+def test_title_review_resets_stale_auto_imdb_but_keeps_manual_imdb(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute('''
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES
+                ('P0001', 'input/P0001.jpg', 'P0001.jpg'),
+                ('P0002', 'input/P0002.jpg', 'P0002.jpg')
+            ''')
+        con.execute('''
+            INSERT INTO movie_extraction (id, extraction_title, extraction_team_json)
+            VALUES
+                ('P0001', 'Lejos.', '[]'),
+                ('P0002', 'Título viejo', '[]')
+            ''')
+        con.execute('''
+            INSERT INTO movie_imdb (id, imdb_query, imdb_url, imdb_id, imdb_status)
+            VALUES
+                ('P0001', 'imdb-find:Lejos.', 'https://www.imdb.com/title/tt0951297/', 'tt0951297', 'found'),
+                ('P0002', 'manual:https://www.imdb.com/title/tt0000002/', 'https://www.imdb.com/title/tt0000002/', 'tt0000002', 'found')
+            ''')
+        con.execute('''
+            INSERT INTO movie_workflow (id)
+            VALUES ('P0001'), ('P0002')
+            ''')
+
+    auto_response = client.put(
+        "/movies/P0001/title-team",
+        json={"title": "la ley del deseo", "team": []},
+    )
+    assert auto_response.status_code == 200
+    auto_movie = client.get("/movies/P0001").json()
+    assert auto_movie["manual_title"] == "la ley del deseo"
+    assert auto_movie["imdb_query"] is None
+    assert auto_movie["imdb_url"] is None
+    assert auto_movie["imdb_id"] is None
+    assert auto_movie["imdb_status"] == "pending"
+    assert auto_movie["pipeline_stage"] == "imdb"
+
+    manual_response = client.put(
+        "/movies/P0002/title-team",
+        json={"title": "Título nuevo", "team": []},
+    )
+    assert manual_response.status_code == 200
+    manual_movie = client.get("/movies/P0002").json()
+    assert manual_movie["imdb_query"] == "manual:https://www.imdb.com/title/tt0000002/"
+    assert manual_movie["imdb_url"] == "https://www.imdb.com/title/tt0000002/"
+    assert manual_movie["imdb_id"] == "tt0000002"
+    assert manual_movie["imdb_status"] == "found"
+
+
+def test_imdb_batch_retries_auto_url_when_saved_query_is_stale(tmp_path, monkeypatch):
+    app = _load_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    db_path = tmp_path / "movies.duckdb"
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute('''
+            INSERT INTO movies_core (id, image_path, image_filename)
+            VALUES ('P0001', 'input/P0001.jpg', 'P0001.jpg')
+            ''')
+        con.execute('''
+            INSERT INTO movie_extraction (id, extraction_title, manual_title, extraction_team_json, manual_team_json)
+            VALUES ('P0001', 'Lejos.', 'la ley del deseo', '[]', '[]')
+            ''')
+        con.execute('''
+            INSERT INTO movie_imdb (id, imdb_query, imdb_url, imdb_id, imdb_status)
+            VALUES ('P0001', 'imdb-find:Lejos.', 'https://www.imdb.com/title/tt0951297/', 'tt0951297', 'found')
+            ''')
+        con.execute("INSERT INTO movie_workflow (id) VALUES ('P0001')")
+
+    from src.backend.services import imdb_links
+
+    calls: list[str] = []
+
+    def fake_google_search(term, num_results=None):
+        calls.append(term)
+        if term == "la ley del deseo site:imdb.com/title":
+            return ["https://www.imdb.com/title/tt0093412/"]
+        return []
+
+    monkeypatch.setattr(imdb_links, "google_search", fake_google_search)
+    monkeypatch.setattr(imdb_links, "CinemagoerIMDb", None)
+
+    response = client.post(
+        "/imdb/search",
+        json={"limit": 1, "overwrite": False, "max_results": 5},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["processed"] == 1
+    assert "la ley del deseo site:imdb.com/title" in calls
+    movie = client.get("/movies/P0001").json()
+    assert movie["imdb_query"] == "la ley del deseo site:imdb.com/title"
+    assert movie["imdb_url"] == "https://www.imdb.com/title/tt0093412/"
+    assert movie["imdb_id"] == "tt0093412"
+
+
 def test_imdb_title_es_uses_localized_imdb_page_and_structured_data(tmp_path, monkeypatch):
     app = _load_app(tmp_path, monkeypatch)
     client = TestClient(app)
@@ -431,6 +592,7 @@ def test_imdb_title_es_uses_localized_imdb_page_and_structured_data(tmp_path, mo
     movie = client.get("/movies/P0001").json()
     assert movie["imdb_title_es"] == "Título español"
     assert movie["imdb_title_es_status"] == "fetched"
+
 
 def test_imdb_title_es_falls_back_to_extracted_title_when_imdb_blocks_scrape(tmp_path, monkeypatch):
     app = _load_app(tmp_path, monkeypatch)
